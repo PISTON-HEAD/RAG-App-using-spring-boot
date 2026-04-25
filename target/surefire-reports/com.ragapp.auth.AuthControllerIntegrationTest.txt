@@ -1,4 +1,0 @@
--------------------------------------------------------------------------------
-Test set: com.ragapp.auth.AuthControllerIntegrationTest
--------------------------------------------------------------------------------
-Tests run: 7, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 9.889 s -- in com.ragapp.auth.AuthControllerIntegrationTest

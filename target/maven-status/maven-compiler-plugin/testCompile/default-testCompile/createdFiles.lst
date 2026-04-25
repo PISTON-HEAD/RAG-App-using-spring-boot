@@ -1,6 +1,0 @@
-com\ragapp\exception\GlobalExceptionHandlerTest.class
-com\ragapp\auth\AuthControllerIntegrationTest.class
-com\ragapp\document\DocumentServiceTest.class
-com\ragapp\auth\JwtRoundTripTest.class
-com\ragapp\auth\JwtServiceTest.class
-com\ragapp\query\QueryServiceTest.class
