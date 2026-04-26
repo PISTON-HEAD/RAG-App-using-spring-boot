@@ -1,7 +1,11 @@
 package com.ragapp.document;
 
-import com.ragapp.dto.DocumentInfo;
-import com.ragapp.dto.DocumentUploadResponse;
+import java.io.IOException;
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+
 import org.springframework.ai.document.Document;
 import org.springframework.ai.reader.tika.TikaDocumentReader;
 import org.springframework.ai.transformer.splitter.TokenTextSplitter;
@@ -11,11 +15,8 @@ import org.springframework.core.io.InputStreamResource;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 
-import java.io.IOException;
-import java.util.List;
-import java.util.Map;
-import java.util.UUID;
-import java.util.concurrent.ConcurrentHashMap;
+import com.ragapp.dto.DocumentInfo;
+import com.ragapp.dto.DocumentUploadResponse;
 
 @Service
 public class DocumentService {
@@ -46,7 +47,7 @@ public class DocumentService {
         List<Document> rawDocuments = reader.get();
 
         // 2. Split into chunks
-        TokenTextSplitter splitter = new TokenTextSplitter(chunkSize, chunkOverlap, 5, 10000, true);
+        TokenTextSplitter splitter = new TokenTextSplitter(chunkSize, chunkOverlap, 5, 10000, true, List.of('.', '?', '!', ';'));
         List<Document> chunks = splitter.apply(rawDocuments);
 
         // 3. Tag each chunk with documentId for filtering

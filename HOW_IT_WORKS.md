@@ -1,6 +1,6 @@
 # Spring Boot RAG Application — Complete Technical Guide
 
-> **Goal of this document:** Teach you everything about this project at the code level.  
+> **Goal of this document:** Teach you everything about this project at the code level — for someone who is new to RAG, Spring Boot, LLMs, and vector embeddings.  
 > From an HTTP request arriving at the server, through authentication, document parsing, embedding, vector storage, similarity search, and LLM answer generation — every single step explained.
 
 ---
@@ -8,32 +8,34 @@
 ## Table of Contents
 
 1. [What is RAG?](#1-what-is-rag)
-2. [Project Overview & Package Structure](#2-project-overview--package-structure)
-3. [How Spring Boot Starts Up](#3-how-spring-boot-starts-up)
-4. [Authentication Layer — JWT Deep Dive](#4-authentication-layer--jwt-deep-dive)
-   - 4.1 [What is JWT?](#41-what-is-jwt)
-   - 4.2 [SecurityConfig & the Filter Chain](#42-securityconfig--the-filter-chain)
-   - 4.3 [JwtService — Token Creation & Validation](#43-jwtservice--token-creation--validation)
-   - 4.4 [JwtAuthenticationFilter — Request Interception](#44-jwtauthenticationfilter--request-interception)
-   - 4.5 [AuthController — The Login Endpoint](#45-authcontroller--the-login-endpoint)
-5. [What is Multipart? How Files Travel Over HTTP](#5-what-is-multipart-how-files-travel-over-http)
-6. [Document Ingestion Pipeline — Step by Step](#6-document-ingestion-pipeline--step-by-step)
-   - 6.1 [Apache Tika — Parsing Any File Type](#61-apache-tika--parsing-any-file-type)
-   - 6.2 [Text Chunking — Why & How](#62-text-chunking--why--how)
-   - 6.3 [What is a Vector / Embedding?](#63-what-is-a-vector--embedding)
-   - 6.4 [How Text Becomes a Vector](#64-how-text-becomes-a-vector)
-   - 6.5 [SimpleVectorStore — How Vectors Are Stored](#65-simplevectorstore--how-vectors-are-stored)
-   - 6.6 [Metadata Tagging — The documentId Filter](#66-metadata-tagging--the-documentid-filter)
-7. [RAG Query Pipeline — The Full Flow](#7-rag-query-pipeline--the-full-flow)
-   - 7.1 [Embedding the Question](#71-embedding-the-question)
-   - 7.2 [Cosine Similarity Search](#72-cosine-similarity-search)
-   - 7.3 [Building the Augmented Prompt](#73-building-the-augmented-prompt)
-   - 7.4 [Calling the LLM](#74-calling-the-llm)
-8. [Your Question: documentId vs Free Query, Multi-doc Search](#8-your-question-documentid-vs-free-query-multi-doc-search)
-9. [All Exposed API Endpoints](#9-all-exposed-api-endpoints)
-10. [Configuration — application.properties Explained](#10-configuration--applicationproperties-explained)
-11. [How Every Class Fits Together (Dependency Map)](#11-how-every-class-fits-together-dependency-map)
-12. [End-to-End Request Traces](#12-end-to-end-request-traces)
+2. [Architecture Overview — Gemini + ONNX](#2-architecture-overview--gemini--onnx)
+3. [Project Overview & Package Structure](#3-project-overview--package-structure)
+4. [How Spring Boot Starts Up](#4-how-spring-boot-starts-up)
+5. [Authentication Layer — JWT Deep Dive](#5-authentication-layer--jwt-deep-dive)
+   - 5.1 [What is JWT?](#51-what-is-jwt)
+   - 5.2 [SecurityConfig & the Filter Chain](#52-securityconfig--the-filter-chain)
+   - 5.3 [JwtService — Token Creation & Validation](#53-jwtservice--token-creation--validation)
+   - 5.4 [JwtAuthenticationFilter — Request Interception](#54-jwtauthenticationfilter--request-interception)
+   - 5.5 [AuthController — The Login Endpoint](#55-authcontroller--the-login-endpoint)
+6. [What is Multipart? How Files Travel Over HTTP](#6-what-is-multipart-how-files-travel-over-http)
+7. [Document Ingestion Pipeline — Step by Step](#7-document-ingestion-pipeline--step-by-step)
+   - 7.1 [Apache Tika — Parsing Any File Type](#71-apache-tika--parsing-any-file-type)
+   - 7.2 [Text Chunking — Why & How](#72-text-chunking--why--how)
+   - 7.3 [What is a Vector / Embedding?](#73-what-is-a-vector--embedding)
+   - 7.4 [How Text Becomes a Vector — ONNX Deep Dive](#74-how-text-becomes-a-vector--onnx-deep-dive)
+   - 7.5 [OnnxEmbeddingModel — The Custom Class Explained](#75-onnxembeddingmodel--the-custom-class-explained)
+   - 7.6 [SimpleVectorStore — How Vectors Are Stored](#76-simplevectorstore--how-vectors-are-stored)
+   - 7.7 [Metadata Tagging — The documentId Filter](#77-metadata-tagging--the-documentid-filter)
+8. [RAG Query Pipeline — The Full Flow](#8-rag-query-pipeline--the-full-flow)
+   - 8.1 [Embedding the Question](#81-embedding-the-question)
+   - 8.2 [Cosine Similarity Search](#82-cosine-similarity-search)
+   - 8.3 [Building the Augmented Prompt](#83-building-the-augmented-prompt)
+   - 8.4 [Calling Google Gemini](#84-calling-google-gemini)
+9. [Per-Document vs Cross-Document Query](#9-per-document-vs-cross-document-query)
+10. [All Exposed API Endpoints](#10-all-exposed-api-endpoints)
+11. [Configuration — application.properties Explained](#11-configuration--applicationproperties-explained)
+12. [How Every Class Fits Together (Dependency Map)](#12-how-every-class-fits-together-dependency-map)
+13. [End-to-End Request Traces](#13-end-to-end-request-traces)
 
 ---
 
@@ -41,7 +43,7 @@
 
 **RAG = Retrieval-Augmented Generation**
 
-Without RAG, if you ask GPT-4 "What does clause 12 of my employment contract say?" it has no idea — it has never seen your contract and cannot make one up (well, it will hallucinate one, which is dangerous).
+Without RAG, if you ask Gemini "What does clause 12 of my employment contract say?" it has no idea — it has never seen your contract and may hallucinate a plausible-sounding but wrong answer.
 
 RAG solves this by giving the LLM relevant context _at query time_:
 
@@ -56,11 +58,55 @@ RAG:
                              User question + retrieved passages ──► LLM ──► Grounded answer
 ```
 
-The LLM is not guessing. It is reading your documents and summarizing what it finds.
+The LLM is not guessing. It reads your document's relevant parts and summarizes what it finds.
+
+**The three pillars of RAG:**
+
+| Pillar | What it does | Technology in this app |
+|--------|-------------|------------------------|
+| **Retrieval** | Find relevant text from your documents | ONNX all-MiniLM-L6-v2 + SimpleVectorStore |
+| **Augmentation** | Combine retrieved text with the question | `QueryService.buildResponse()` |
+| **Generation** | Produce a fluent, grounded answer | Google Gemini 2.0 Flash |
 
 ---
 
-## 2. Project Overview & Package Structure
+## 2. Architecture Overview — Gemini + ONNX
+
+This application uses **two separate AI models** for two completely different jobs:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                          EMBEDDING (Local, Free)                            │
+│                                                                             │
+│  Text ──► [HuggingFace Tokenizer] ──► tokens ──► [ONNX Runtime]            │
+│                                                        │                   │
+│               all-MiniLM-L6-v2 model (86 MB)           │                   │
+│               runs entirely on your machine            ▼                   │
+│                                              float[384] vector              │
+│                                                                             │
+│  No API key needed. No internet call at inference time. Always free.        │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        GENERATION (Cloud, API Key)                          │
+│                                                                             │
+│  Prompt ──► [Spring AI ChatClient] ──► HTTPS ──► Google Gemini API          │
+│                                                        │                   │
+│             gemini-2.0-flash model                     ▼                   │
+│             (Google's cloud servers)           Natural language answer      │
+│                                                                             │
+│  Requires: GOOGLE_GENAI_API_KEY. Billed per token (but has a free tier).   │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Why two different AI services?**
+
+- **Embeddings** (turning text into vectors for semantic search) are a solved problem. Small, open-source models like `all-MiniLM-L6-v2` do this extremely well, run locally, and are completely free. There is no reason to pay an external API for this.
+- **Generation** (synthesizing a coherent, human-readable answer from context) benefits from a large, powerful model. Google Gemini 2.0 Flash is a state-of-the-art model with excellent reasoning capabilities.
+
+---
+
+## 3. Project Overview & Package Structure
 
 ```
 spring-rag-app/
@@ -70,7 +116,8 @@ spring-rag-app/
     ├── SpringRagApplication.java        # @SpringBootApplication entry point
     │
     ├── config/
-    │   ├── AiConfig.java               # Wires up the in-memory vector store
+    │   ├── AiConfig.java               # Wires up EmbeddingModel + SimpleVectorStore
+    │   ├── OnnxEmbeddingModel.java     # Custom ONNX embedding model (no DJL)
     │   ├── SecurityConfig.java          # HTTP security rules + filter chain
     │   └── UserConfig.java             # Hard-coded users, password encoder
     │
@@ -85,8 +132,8 @@ spring-rag-app/
     │
     ├── query/
     │   ├── QueryController.java         # POST /documents/{id}/query
-    │   │                                # POST /query (cross-document)
-    │   └── QueryService.java            # Similarity search → Prompt → LLM → Answer
+    │   ├── GlobalQueryController.java   # POST /query (cross-document)
+    │   └── QueryService.java            # Similarity search → Prompt → Gemini → Answer
     │
     ├── dto/
     │   ├── LoginRequest.java
@@ -102,22 +149,26 @@ spring-rag-app/
 
 **Dependencies (from pom.xml) and why each one is there:**
 
-| Dependency                                | Why We Need It                                                         |
-| ----------------------------------------- | ---------------------------------------------------------------------- |
-| `spring-boot-starter-web`                 | HTTP server (Tomcat), REST controllers, JSON serialization             |
-| `spring-boot-starter-security`            | Security filter chain, `@EnableWebSecurity`, `AuthenticationManager`   |
-| `spring-ai-openai-spring-boot-starter`    | Auto-configures `ChatModel` (GPT-4o-mini) + `EmbeddingModel` (ada-002) |
-| `spring-ai-tika-document-reader`          | Apache Tika — extracts text from PDF, DOCX, TXT, HTML, etc.            |
-| `jjwt-api` + `jjwt-impl` + `jjwt-jackson` | JWT token creation and parsing                                         |
-| `spring-boot-starter-validation`          | `@NotBlank` and `@Valid` on request DTOs                               |
+| Dependency | Why We Need It |
+|---|---|
+| `spring-boot-starter-web` | HTTP server (Tomcat), REST controllers, JSON serialization |
+| `spring-boot-starter-security` | Security filter chain, `@EnableWebSecurity`, `AuthenticationManager` |
+| `spring-ai-starter-model-google-genai` | Auto-configures `ChatModel` for Google Gemini via REST API |
+| `spring-ai-starter-model-transformers` | Provides `ResourceCacheService`, `HuggingFaceTokenizer`, ONNX infra classes |
+| `spring-ai-vector-store` | `SimpleVectorStore` — in-memory vector store |
+| `spring-ai-tika-document-reader` | Apache Tika — extracts text from PDF, DOCX, TXT, HTML, etc. |
+| `jjwt-api` + `jjwt-impl` + `jjwt-jackson` | JWT token creation and parsing |
+| `spring-boot-starter-validation` | `@NotBlank` and `@Valid` on request DTOs |
+| `onnxruntime` (transitive) | Microsoft ONNX Runtime — actually runs the embedding model in Java |
+| `tokenizers` (transitive, DJL) | HuggingFace Rust tokenizer — converts text to token IDs |
 
 ---
 
-## 3. How Spring Boot Starts Up
+## 4. How Spring Boot Starts Up
 
 ```java
 // SpringRagApplication.java
-@SpringBootApplication
+@SpringBootApplication(exclude = {TransformersEmbeddingModelAutoConfiguration.class})
 public class SpringRagApplication {
     public static void main(String[] args) {
         SpringApplication.run(SpringRagApplication.class, args);
@@ -125,11 +176,9 @@ public class SpringRagApplication {
 }
 ```
 
-`@SpringBootApplication` is three annotations in one:
+**Why is `TransformersEmbeddingModelAutoConfiguration` excluded?**
 
-- `@Configuration` — this class can define beans
-- `@EnableAutoConfiguration` — Spring Boot reads pom.xml dependencies and auto-configures beans (e.g., sees `spring-ai-openai-spring-boot-starter` → creates `ChatModel` bean automatically)
-- `@ComponentScan` — scans the `com.ragapp` package and all sub-packages for classes annotated with `@Service`, `@Component`, `@Controller`, `@Repository`
+The `spring-ai-starter-model-transformers` dependency would normally auto-configure a `TransformersEmbeddingModel` bean. That bean's default mean-pooling implementation uses DJL (Deep Java Library), which tries to download PyTorch native binaries from the internet on first use. In corporate network environments with SSL certificate inspection this download fails. By excluding the auto-configuration, we prevent this from happening and instead use our own `OnnxEmbeddingModel` class (see [Section 7.5](#75-onnxembeddingmodel--the-custom-class-explained)) that does mean pooling entirely in pure Java with no native downloads.
 
 **Boot sequence:**
 
@@ -139,19 +188,26 @@ main() called
        ├─ Creates ApplicationContext
        ├─ Scans for @Component / @Service / @Controller classes
        ├─ Reads application.properties
-       ├─ Runs AutoConfiguration (creates ChatModel, EmbeddingModel from OpenAI starter)
-       ├─ Creates SimpleVectorStore (AiConfig.java)
+       ├─ Runs AutoConfiguration:
+       │    ├─ Sees spring-ai-starter-model-google-genai → creates ChatModel (Gemini) bean
+       │    └─ Skips TransformersEmbeddingModelAutoConfiguration (excluded)
+       ├─ Runs AiConfig.java:
+       │    ├─ Creates OnnxEmbeddingModel bean
+       │    │    ├─ ResourceCacheService checks temp dir for cached model files
+       │    │    ├─ Loads tokenizer.json → HuggingFaceTokenizer
+       │    │    └─ Loads model.onnx (86 MB) → OrtSession (ONNX Runtime session)
+       │    └─ Creates SimpleVectorStore(embeddingModel) bean
        ├─ Creates UserDetailsService with admin/user (UserConfig.java)
        ├─ Creates JwtService, JwtAuthenticationFilter
        ├─ Builds SecurityFilterChain (SecurityConfig.java)
-       └─ Starts embedded Tomcat on port 8080
+       └─ Starts embedded Tomcat on port 8082
 ```
 
 ---
 
-## 4. Authentication Layer — JWT Deep Dive
+## 5. Authentication Layer — JWT Deep Dive
 
-### 4.1 What is JWT?
+### 5.1 What is JWT?
 
 **JWT = JSON Web Token**
 
@@ -168,7 +224,7 @@ HEADER.PAYLOAD.SIGNATURE
 
 Part 1 — Header (Base64 decoded):
 {
-  "alg": "HS384"     ← signing algorithm
+  "alg": "HS384"     ← signing algorithm (HMAC-SHA384)
 }
 
 Part 2 — Payload (Base64 decoded):
@@ -176,7 +232,7 @@ Part 2 — Payload (Base64 decoded):
   "sub": "admin",                   ← username (subject)
   "roles": [{"authority":"ROLE_ADMIN"}],
   "iat": 1777096386,                ← issued at (Unix timestamp)
-  "exp": 1777100003                 ← expires at
+  "exp": 1777100003                 ← expires at (iat + 1 hour)
 }
 
 Part 3 — Signature:
@@ -187,7 +243,7 @@ Part 3 — Signature:
 
 The signature is computed using a **secret key** that only the server knows. If anyone tampers with the payload (e.g., changes `"sub":"user"` to `"sub":"admin"`), the signature no longer matches and the server rejects it. No session storage needed on the server side — the token itself contains all the information.
 
-### 4.2 SecurityConfig & the Filter Chain
+### 5.2 SecurityConfig & the Filter Chain
 
 ```java
 // SecurityConfig.java
@@ -195,15 +251,13 @@ The signature is computed using a **secret key** that only the server knows. If 
 @EnableWebSecurity
 public class SecurityConfig {
 
-    private final JwtAuthenticationFilter jwtAuthFilter;
-
     @Bean
     public SecurityFilterChain securityFilterChain(
             HttpSecurity http, AuthenticationProvider authProvider) throws Exception {
         http
             .csrf(AbstractHttpConfigurer::disable)
-            // csrf protection is for browser sessions with cookies
-            // we use stateless JWT so CSRF is not applicable
+            // CSRF protection is for browser sessions with cookies.
+            // We use stateless JWT so CSRF is not applicable.
 
             .authorizeHttpRequests(auth -> auth
                 .requestMatchers("/auth/**").permitAll()   // /auth/login needs no token
@@ -212,13 +266,12 @@ public class SecurityConfig {
 
             .sessionManagement(session ->
                 session.sessionCreationPolicy(SessionCreationPolicy.STATELESS)
-                // STATELESS = never create a HttpSession
-                // every request MUST carry its own JWT
+                // STATELESS = never create a HttpSession.
+                // Every request MUST carry its own JWT.
             )
 
             .authenticationProvider(authProvider)
             .addFilterBefore(jwtAuthFilter, UsernamePasswordAuthenticationFilter.class);
-            // Insert our JWT filter BEFORE Spring's default username/password filter
 
         return http.build();
     }
@@ -235,80 +288,36 @@ Incoming HTTP Request
 [SecurityContextHolderFilter]
 [HeaderWriterFilter]
 [LogoutFilter]
-[JwtAuthenticationFilter]   ◄── Our custom filter runs here
+[JwtAuthenticationFilter]   ◄── Our custom filter: reads JWT, populates SecurityContext
 [UsernamePasswordAuthenticationFilter]
 [ExceptionTranslationFilter]
-[AuthorizationFilter]        ◄── This checks if the request is authenticated
+[AuthorizationFilter]        ◄── Checks if the request is authenticated; rejects if not
        │
        ▼
   Your Controller
 ```
 
-`addFilterBefore(jwtAuthFilter, UsernamePasswordAuthenticationFilter.class)` means "insert JwtAuthenticationFilter at position just before the UsernamePasswordAuthenticationFilter". By the time `AuthorizationFilter` runs, our filter has already populated `SecurityContextHolder` with the authenticated user.
-
-**UserConfig (separate class to break circular dependency):**
-
-```java
-@Configuration
-public class UserConfig {
-
-    @Bean
-    public PasswordEncoder passwordEncoder() {
-        return new BCryptPasswordEncoder();
-        // BCrypt is a slow, salted hashing algorithm
-        // "admin123" stored as "$2a$10$xyz..." (different hash each time due to salt)
-    }
-
-    @Bean
-    public UserDetailsService userDetailsService(PasswordEncoder encoder) {
-        var admin = User.builder()
-            .username("admin")
-            .password(encoder.encode("admin123"))  // hashed, never plain text
-            .roles("ADMIN")
-            .build();
-        // stored in memory — no database
-        return new InMemoryUserDetailsManager(admin, user);
-    }
-
-    @Bean
-    public AuthenticationProvider authenticationProvider(
-            UserDetailsService uds, PasswordEncoder encoder) {
-        DaoAuthenticationProvider provider = new DaoAuthenticationProvider();
-        provider.setUserDetailsService(uds);
-        provider.setPasswordEncoder(encoder);
-        return provider;
-        // This is what Spring calls when AuthenticationManager.authenticate() is invoked
-        // It loads the user, BCrypt-checks the password
-    }
-}
-```
-
-### 4.3 JwtService — Token Creation & Validation
+### 5.3 JwtService — Token Creation & Validation
 
 ```java
 // JwtService.java
 @Service
 public class JwtService {
 
-    @Value("${app.jwt.secret}")  // from application.properties
-    private String secretKey;   // "404E635266556A586E..." (hex-encoded 256-bit key)
+    @Value("${app.jwt.secret}")
+    private String secretKey;   // Hex-encoded 256-bit key from application.properties
 
     @Value("${app.jwt.expiration-ms}")
     private long expirationMs;  // 3600000 = 1 hour
 
     public String generateToken(UserDetails userDetails) {
         return Jwts.builder()
-            .subject(userDetails.getUsername())   // "admin" goes into "sub" claim
+            .subject(userDetails.getUsername())           // "admin" → "sub" claim
             .claims(Map.of("roles", userDetails.getAuthorities()))
-            .issuedAt(new Date())                 // current time
-            .expiration(new Date(System.currentTimeMillis() + expirationMs))  // 1 hour later
-            .signWith(getSigningKey())             // HMAC-SHA384 with your secret
-            .compact();                           // combine & base64url encode all 3 parts
-    }
-
-    public String extractUsername(String token) {
-        return extractClaims(token).getSubject();
-        // decodes the payload, verifies signature, returns "sub" field
+            .issuedAt(new Date())
+            .expiration(new Date(System.currentTimeMillis() + expirationMs))
+            .signWith(getSigningKey())                    // HMAC-SHA384 with secret key
+            .compact();                                   // produces "eyJhbGci..."
     }
 
     public boolean isTokenValid(String token, UserDetails userDetails) {
@@ -316,110 +325,92 @@ public class JwtService {
             String username = extractUsername(token);
             return username.equals(userDetails.getUsername()) && !isTokenExpired(token);
         } catch (ExpiredJwtException e) {
-            return false;  // token expired → invalid
+            return false;
         }
     }
 
     private Claims extractClaims(String token) {
         return Jwts.parser()
-            .verifyWith(getSigningKey())   // uses the SAME secret key to verify signature
+            .verifyWith(getSigningKey())   // verifies signature using same secret key
             .build()
             .parseSignedClaims(token)      // throws if signature mismatch or expired
-            .getPayload();                 // returns the claims (payload)
-    }
-
-    private SecretKey getSigningKey() {
-        byte[] keyBytes = Decoders.BASE64.decode(secretKey);
-        return Keys.hmacShaKeyFor(keyBytes);  // creates a SecretKey object for JJWT
+            .getPayload();
     }
 }
 ```
 
-### 4.4 JwtAuthenticationFilter — Request Interception
+### 5.4 JwtAuthenticationFilter — Request Interception
 
 ```java
 // JwtAuthenticationFilter.java
 @Component
 public class JwtAuthenticationFilter extends OncePerRequestFilter {
-    // OncePerRequestFilter guarantees doFilterInternal is called EXACTLY once per request
-    // Even if a filter chain is re-triggered internally, this won't run twice
+    // OncePerRequestFilter: runs exactly once per HTTP request.
 
     @Override
     protected void doFilterInternal(request, response, filterChain) {
 
         // Step 1: Read the Authorization header
         String authHeader = request.getHeader("Authorization");
-        // Expected value: "Bearer eyJhbGci..."
+        // Expected: "Bearer eyJhbGci..."
 
         if (authHeader == null || !authHeader.startsWith("Bearer ")) {
-            filterChain.doFilter(request, response);  // skip, let Spring Security handle it
+            filterChain.doFilter(request, response);  // no token → pass through
             return;
         }
 
-        // Step 2: Extract just the token (remove "Bearer " prefix)
-        String jwt = authHeader.substring(7);
+        // Step 2: Extract the raw token
+        String jwt = authHeader.substring(7);  // remove "Bearer " prefix
 
         try {
-            // Step 3: Decode the token and get the username from the "sub" claim
+            // Step 3: Decode token → get username from "sub" claim
             String username = jwtService.extractUsername(jwt);
 
-            // Step 4: Only proceed if there's no existing authentication in context
-            // (prevents re-processing if something already authenticated this request)
             if (username != null && SecurityContextHolder.getContext().getAuthentication() == null) {
 
-                // Step 5: Load full user details from InMemoryUserDetailsManager
+                // Step 4: Load full user details from InMemoryUserDetailsManager
                 UserDetails userDetails = userDetailsService.loadUserByUsername(username);
 
-                // Step 6: Validate token (username matches + not expired)
+                // Step 5: Validate: username matches + not expired
                 if (jwtService.isTokenValid(jwt, userDetails)) {
 
-                    // Step 7: Create an authentication object
+                    // Step 6: Create authenticated token and put it in SecurityContext
                     UsernamePasswordAuthenticationToken authToken =
                         new UsernamePasswordAuthenticationToken(
-                            userDetails,             // principal (the user object)
-                            null,                    // credentials (null — already verified)
-                            userDetails.getAuthorities()  // [ROLE_ADMIN] or [ROLE_USER]
+                            userDetails, null, userDetails.getAuthorities()
                         );
-                    authToken.setDetails(new WebAuthenticationDetailsSource().buildDetails(request));
-                    // adds IP address, session ID to auth context — useful for audit logging
-
-                    // Step 8: Store in SecurityContextHolder (thread-local storage)
                     SecurityContextHolder.getContext().setAuthentication(authToken);
-                    // Now the request is "authenticated" — AuthorizationFilter will let it through
+                    // The AuthorizationFilter will now see this user as authenticated.
                 }
             }
         } catch (Exception ignored) {
-            // Tampered token, malformed token, wrong key — silently skip
-            // The SecurityContext has no authentication → AuthorizationFilter rejects with 403
+            // Tampered/malformed/expired token → SecurityContext stays empty → 403
         }
 
-        // Step 9: Continue down the filter chain
         filterChain.doFilter(request, response);
     }
 }
 ```
 
-### 4.5 AuthController — The Login Endpoint
+### 5.5 AuthController — The Login Endpoint
 
 ```java
 // AuthController.java
 @PostMapping("/auth/login")
 public ResponseEntity<LoginResponse> login(@Valid @RequestBody LoginRequest request) {
 
-    // Step 1: @Valid triggers Jakarta validation
-    // LoginRequest has @NotBlank on both fields
-    // if blank → MethodArgumentNotValidException → GlobalExceptionHandler returns 400
+    // @Valid triggers Jakarta validation: @NotBlank on username and password.
+    // If blank → MethodArgumentNotValidException → 400 Bad Request
 
-    // Step 2: Authenticate username/password
+    // Authenticate username/password using DaoAuthenticationProvider:
+    //   1. Load user from InMemoryUserDetailsManager
+    //   2. BCrypt.check(inputPassword, storedHash)
+    //   3. Mismatch → BadCredentialsException → 401 Unauthorized
     authenticationManager.authenticate(
         new UsernamePasswordAuthenticationToken(request.username(), request.password())
     );
-    // This calls DaoAuthenticationProvider (from UserConfig):
-    //   1. Loads user by username from InMemoryUserDetailsManager
-    //   2. BCrypt.check(input_password, stored_hash)
-    //   3. If mismatch → throws BadCredentialsException → GlobalExceptionHandler returns 401
 
-    // Step 3: If we get here, credentials are valid — generate JWT
+    // Credentials are valid — generate a JWT
     UserDetails userDetails = userDetailsService.loadUserByUsername(request.username());
     String token = jwtService.generateToken(userDetails);
 
@@ -428,26 +419,23 @@ public ResponseEntity<LoginResponse> login(@Valid @RequestBody LoginRequest requ
 }
 ```
 
+**Default users (in-memory, no database):**
+
+| Username | Password | Role |
+|----------|----------|------|
+| `admin` | `admin123` | `ROLE_ADMIN` |
+| `user` | `user123` | `ROLE_USER` |
+
 ---
 
-## 5. What is Multipart? How Files Travel Over HTTP
+## 6. What is Multipart? How Files Travel Over HTTP
 
-When a browser or curl sends a file to a server, it cannot just put binary file bytes directly in the HTTP body (the body is text/JSON in normal requests). Instead, it uses a special format called **multipart/form-data**.
-
-**Normal JSON request body:**
-
-```http
-POST /auth/login HTTP/1.1
-Content-Type: application/json
-
-{"username": "admin", "password": "admin123"}
-```
-
-**Multipart file upload:**
+When a client sends a file to a server, it cannot put binary bytes in a JSON body. It uses **multipart/form-data**:
 
 ```http
 POST /documents/upload HTTP/1.1
 Content-Type: multipart/form-data; boundary=----WebKitFormBoundary7MA4YWxk
+Authorization: Bearer eyJhbGci...
 
 ------WebKitFormBoundary7MA4YWxk
 Content-Disposition: form-data; name="file"; filename="report.pdf"
@@ -457,352 +445,435 @@ Content-Type: application/pdf
 ------WebKitFormBoundary7MA4YWxk--
 ```
 
-The `boundary` is a random separator string that marks where each "part" starts and ends. The HTTP body can have multiple parts — this is why it's called "multipart".
-
-Spring Boot automatically parses this using `MultipartFile`:
-
-```java
-// DocumentController.java
-@PostMapping(value = "/documents/upload", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
-public ResponseEntity<DocumentUploadResponse> uploadDocument(
-        @RequestParam("file") MultipartFile file) {
-    // @RequestParam("file") tells Spring: find the part named "file" in the multipart body
-    // MultipartFile gives you:
-    //   file.getOriginalFilename()  → "report.pdf"
-    //   file.getSize()              → 1048576 (bytes)
-    //   file.getContentType()       → "application/pdf"
-    //   file.getInputStream()       → raw bytes to read from
-    //   file.isEmpty()              → false
-}
-```
-
-**application.properties file size limits:**
+Spring Boot automatically parses this with `@RequestParam("file") MultipartFile file`.  
+File size limits are configured in `application.properties`:
 
 ```properties
-spring.servlet.multipart.max-file-size=10MB       # max single file
-spring.servlet.multipart.max-request-size=10MB    # max entire request
+spring.servlet.multipart.max-file-size=10MB
+spring.servlet.multipart.max-request-size=10MB
 ```
 
-If exceeded, Spring throws `MaxUploadSizeExceededException`, which our `GlobalExceptionHandler` catches and returns a clean 413 response.
+If exceeded → `MaxUploadSizeExceededException` → `GlobalExceptionHandler` → 413 response.
 
 ---
 
-## 6. Document Ingestion Pipeline — Step by Step
+## 7. Document Ingestion Pipeline — Step by Step
 
-When `POST /documents/upload` is called with a file, `DocumentService.ingestDocument()` runs through 5 steps:
+When `POST /documents/upload` is called, `DocumentService.ingestDocument()` runs through 5 steps:
 
 ```
 MultipartFile (binary bytes)
       │
-Step 1: PARSE  ─── Apache Tika ──► Plain text string
+Step 1: PARSE  ─── Apache Tika ──────────────────► Plain text string
       │
-Step 2: CHUNK  ─── TokenTextSplitter ──► List of text chunks (~800 tokens each)
+Step 2: CHUNK  ─── TokenTextSplitter ────────────► List of ~800-token chunks
       │
-Step 3: TAG    ─── Add metadata: {documentId: "abc-123"} on each chunk
+Step 3: TAG    ─── Add metadata ─────────────────► {documentId: "uuid"} on each chunk
       │
-Step 4: EMBED  ─── OpenAI text-embedding-ada-002 ──► Each chunk becomes a float[1536] vector
+Step 4: EMBED  ─── OnnxEmbeddingModel ───────────► Each chunk → float[384] vector (LOCAL)
       │
-Step 5: STORE  ─── SimpleVectorStore.add() ──► Vectors stored in memory HashMap
+Step 5: STORE  ─── SimpleVectorStore.add() ──────► Vectors stored in memory HashMap
       │
       └── Return: {documentId, filename, totalChunks, "indexed successfully"}
 ```
 
-### 6.1 Apache Tika — Parsing Any File Type
+### 7.1 Apache Tika — Parsing Any File Type
 
 ```java
 // DocumentService.java — Step 1
 TikaDocumentReader reader = new TikaDocumentReader(
     new InputStreamResource(file.getInputStream())
-    // InputStreamResource wraps the raw byte stream from MultipartFile
 );
 List<Document> rawDocuments = reader.get();
 ```
 
-**What is Apache Tika?**
+Tika detects the file type and extracts text:
 
-Tika is a toolkit that can detect the type of virtually any file and extract its text content. It handles:
+| File Type | What Tika does |
+|-----------|----------------|
+| `.pdf` | Uses PDFBox to extract text from each page |
+| `.docx` | Unzips Office Open XML, reads `word/document.xml` |
+| `.txt` | Reads as-is |
+| `.html` | Parses HTML tags, extracts visible text |
+| `.xlsx` | Reads cell values |
+| `.pptx` | Reads slide text |
 
-| File Type | What Tika does                                        |
-| --------- | ----------------------------------------------------- |
-| `.pdf`    | Uses PDFBox to extract text from each page            |
-| `.docx`   | Unzips the Office Open XML, reads `word/document.xml` |
-| `.txt`    | Reads as-is                                           |
-| `.html`   | Parses HTML tags, extracts visible text               |
-| `.xlsx`   | Reads cell values                                     |
-| `.pptx`   | Reads slide text                                      |
+The result is a `List<Document>` — Spring AI's wrapper around extracted text.
 
-The result is a `List<Document>` where `Document` is Spring AI's wrapper:
+### 7.2 Text Chunking — Why & How
 
-```java
-// Spring AI Document
-new Document(
-    "This is the extracted text content...",  // getContent()
-    Map.of("source", "report.pdf")             // getMetadata()
-);
-```
+**Why can't we embed the whole document?**
 
-### 6.2 Text Chunking — Why & How
-
-**Why can't we just embed the whole document?**
-
-1. **Token limits**: OpenAI's embedding model accepts at most ~8191 tokens. A 50-page PDF is ~25,000 tokens.
-2. **Precision**: If you embed the entire document as one vector, the vector is an "average" of everything. When you search for a specific detail, it gets drowned out by everything else.
-3. **Context window**: When we retrieve chunks to send to GPT-4o-mini, the model has a limited context window. We need small, focused pieces of text, not the whole document.
-
-**The chunking code:**
+1. **Token limits**: The ONNX model has a maximum input length (~512 tokens). A 10-page document is far larger.
+2. **Precision**: One vector per whole document is an "average" of everything. A specific detail gets diluted. Small, focused chunks give precise retrieval.
+3. **Context window**: When we send retrieved text to Gemini, we only want the relevant parts — not the entire document.
 
 ```java
 // DocumentService.java — Step 2
 TokenTextSplitter splitter = new TokenTextSplitter(
-    chunkSize,    // 800 — target number of tokens per chunk
-    chunkOverlap, // 100 — overlap between consecutive chunks
-    5,            // minimum chunk size in tokens (too small = useless)
-    10000,        // maximum chunk size in tokens
-    true          // keep separator characters
+    chunkSize,    // 800 — target tokens per chunk
+    chunkOverlap, // 100 — overlap tokens between adjacent chunks
+    5,            // minimum chunk size (discard tiny fragments)
+    10000,        // maximum chunk size ceiling
+    true,         // keep separator characters
+    List.of('.', '?', '!', ';')  // preferred split points (sentence boundaries)
 );
 List<Document> chunks = splitter.apply(rawDocuments);
 ```
 
-**What is a "token"?** Not a word — a token is roughly 4 characters. "Hello world" = 2 tokens. "Retrieval-Augmented Generation" ≈ 5 tokens. OpenAI's tokenizer uses Byte-Pair Encoding (BPE).
+**What is a "token"?** Roughly 4 characters. "Hello world" ≈ 2 tokens. Tokenization is language-model specific.
 
-**Visual example of chunking with overlap:**
-
-```
-Original text (simplified):
-"The quick brown fox jumps over the lazy dog. It was a sunny afternoon.
-The fox decided to rest. The dog was not amused. Evening came slowly."
-
-chunkSize=4 words, overlap=2 words (simplified):
-
-Chunk 1: "The quick brown fox"
-Chunk 2: "brown fox jumps over"   ← 2 words overlap with chunk 1
-Chunk 3: "jumps over the lazy"    ← 2 words overlap with chunk 2
-Chunk 4: "the lazy dog It"
-Chunk 5: "dog It was a"
-...
-```
-
-**Why overlap?** If a sentence or paragraph is cut at a boundary, the 100-token overlap ensures the thought is complete in at least one chunk. Without overlap, you might cut "The contract is void if... [CHUNK BREAK] ...the payment is not received within 30 days" and neither chunk tells the full story.
-
-### 6.3 What is a Vector / Embedding?
-
-A **vector** is just a list of numbers. For example:
+**Visual example with overlap:**
 
 ```
-[0.23, -0.11, 0.84, 0.07, -0.52, ...]  ← 1536 numbers for ada-002
+Original text:
+"The contract is effective from January 1, 2025.
+ Payment is due within 30 days. Late fees apply.
+ Termination requires 60 days notice."
+
+chunkSize=10 words, overlap=3 words (simplified):
+
+Chunk 1: "The contract is effective from January 1, 2025. Payment is"
+Chunk 2: "2025. Payment is due within 30 days. Late fees apply."
+           ↑──── 3-word overlap ────↑
+Chunk 3: "Late fees apply. Termination requires 60 days notice."
 ```
 
-An **embedding** is a vector that encodes the _meaning_ of text. The OpenAI model has learned to assign similar vectors to text with similar meanings:
+Overlap ensures that if a complete thought is split at a chunk boundary, it still appears fully in at least one chunk.
+
+### 7.3 What is a Vector / Embedding?
+
+A **vector** (or **embedding**) is a fixed-length list of floating-point numbers:
 
 ```
-"The cat sat on the mat"  → [0.23, -0.11, 0.84, ...]
-"A feline rested on a rug" → [0.24, -0.10, 0.82, ...]   ← very similar!
-"The stock market crashed"  → [0.91,  0.53, -0.2, ...]   ← very different
+"The cat sat on the mat"      → [0.23, -0.11, 0.84, 0.07, -0.52, ...]   (384 numbers)
+"A feline rested on a rug"    → [0.24, -0.10, 0.82, 0.06, -0.51, ...]   ← very similar!
+"The stock market crashed"    → [0.91,  0.53, -0.20, 0.77,  0.34, ...]  ← very different
 ```
 
-This is the key insight of the entire RAG system: **semantic similarity = vector proximity**.
+The key insight: **text with similar meaning → vectors that are geometrically close in 384-dimensional space.** This is the entire foundation of semantic search.
 
-You don't need to find the exact same words. If you ask "What are the adverse effects?" and the document says "side effects include...", the embeddings of those two phrases will be close together even though the words are different.
+You don't need to find the exact same words. "What are adverse effects?" and "side effects include..." will produce similar vectors even though the words differ.
 
-### 6.4 How Text Becomes a Vector
+### 7.4 How Text Becomes a Vector — ONNX Deep Dive
+
+The all-MiniLM-L6-v2 model is a **Transformer** model — the same architecture as BERT and GPT. It has learned through training on massive amounts of text that "certain positions in 384-dimensional space" correspond to "certain types of meaning".
+
+**The full pipeline from text to vector:**
+
+```
+Input text: "Payment is due within 30 days."
+
+Step A — Tokenization (HuggingFaceTokenizer):
+  "Payment is due within 30 days."
+      ↓
+  Word-piece tokenization:
+  ["[CLS]", "Payment", "is", "due", "within", "30", "days", ".", "[SEP]"]
+      ↓
+  Token IDs (integers):   [101, 7909, 2003, 2349, 2306, 2382, 2420, 1012, 102]
+  Attention mask:         [1,   1,    1,   1,    1,    1,   1,    1,   1   ]
+  Token type IDs:         [0,   0,    0,   0,    0,    0,   0,    0,   0   ]
+
+Step B — Transformer Inference (ONNX Runtime):
+  Input tensors:
+    input_ids:      shape [1, 9]  (batch=1, sequence_length=9)
+    attention_mask: shape [1, 9]
+    token_type_ids: shape [1, 9]
+      ↓
+  6 Transformer layers process the tokens:
+    Each layer: multi-head self-attention → feed-forward → layer norm
+    Tokens "attend" to each other — each token's representation is influenced
+    by the context of surrounding tokens
+      ↓
+  Output: last_hidden_state — shape [1, 9, 384]
+    For each of the 9 tokens, a 384-dimensional context-aware vector
+
+Step C — Mean Pooling (pure Java in OnnxEmbeddingModel):
+  For each token position s (0 to 8):
+    If attention_mask[s] == 1: include this token in the average
+    If attention_mask[s] == 0: padding token, exclude
+
+  pooled[d] = sum(tokenEmbeddings[s][d] * mask[s]) / sum(mask[s])
+              for each dimension d (0 to 383)
+
+  Result: float[384]  — one vector representing the entire sentence meaning
+```
+
+**Why mean pooling?**
+
+The Transformer outputs one vector per input token. We need one vector per sentence. Mean pooling averages all non-padding token vectors (weighted by attention mask). This produces a vector that captures the overall semantic content of the sentence, not just any single word.
+
+**Why [CLS] and [SEP] tokens?**
+
+- `[CLS]` (ID: 101) = "Classification" token — added at the start of every input. In BERT-style models, its output vector sometimes represents the whole sentence. For mean pooling it is included in the average.
+- `[SEP]` (ID: 102) = "Separator" token — marks the end of an input segment.
+
+### 7.5 OnnxEmbeddingModel — The Custom Class Explained
+
+`OnnxEmbeddingModel.java` is a custom Spring component that replaces the default `TransformersEmbeddingModel` from Spring AI. Here is the full explanation of why it exists and how it works.
+
+**Why we wrote a custom class instead of using Spring AI's default:**
+
+Spring AI's `TransformersEmbeddingModel` does tokenization and mean pooling via DJL (Deep Java Library). DJL's mean-pooling code downloads PyTorch native binaries (a ~200 MB download) on first use. In a corporate network environment where SSL certificate inspection blocks connections to `download.pytorch.org`, this download fails with an SSL handshake error, and the application crashes.
+
+Our `OnnxEmbeddingModel`:
+- Uses **ONNX Runtime** directly (already on the classpath via `onnxruntime` JAR) for model inference
+- Uses **HuggingFace tokenizer** (via DJL's `tokenizers` module — a pre-compiled Rust library that does NOT need to download anything) for tokenization
+- Implements **mean pooling in pure Java** — no native PyTorch, no internet download
+
+**The model loading (`afterPropertiesSet`):**
 
 ```java
-// AiConfig.java — this creates the vector store
-@Bean
-public SimpleVectorStore vectorStore(EmbeddingModel embeddingModel) {
-    return new SimpleVectorStore(embeddingModel);
-    // embeddingModel is auto-configured from spring-ai-openai-spring-boot-starter
-    // it wraps the OpenAI text-embedding-ada-002 HTTP API
-}
-```
+private static final String TOKENIZER_URI =
+    "https://raw.githubusercontent.com/spring-projects/spring-ai/main"
+    + "/models/spring-ai-transformers/src/main/.../tokenizer.json";
 
-When `vectorStore.add(chunks)` is called:
+private static final String MODEL_URI =
+    "https://media.githubusercontent.com/media/spring-projects/spring-ai"
+    + "/.../model.onnx";
 
-```
-Spring AI calls EmbeddingModel.embedAll(chunks)
-      │
-      ▼
-HTTP POST to https://api.openai.com/v1/embeddings
-Body: {
-  "model": "text-embedding-ada-002",
-  "input": [
-    "First chunk text goes here...",
-    "Second chunk text goes here...",
-    "Third chunk text goes here..."
-  ]
-}
-      │
-      ▼
-OpenAI Response:
-{
-  "data": [
-    {"index": 0, "embedding": [0.23, -0.11, 0.84, ...1536 numbers...]},
-    {"index": 1, "embedding": [0.51,  0.02, -0.3, ...1536 numbers...]},
-    {"index": 2, "embedding": [-0.1,  0.77,  0.4, ...1536 numbers...]}
-  ]
-}
-      │
-      ▼
-Stored in memory: [ {chunk_text, embedding_vector, metadata}, ... ]
-```
+@Override
+public void afterPropertiesSet() throws Exception {
+    // ResourceCacheService caches files in:
+    //   ${java.io.tmpdir}/spring-ai-onnx-generative/{uuid-of-url}/filename
+    // On the FIRST run: downloads from GitHub (needs internet)
+    // On ALL SUBSEQUENT runs: reads directly from the local cache file (no internet!)
+    ResourceCacheService cache = new ResourceCacheService();
+    DefaultResourceLoader loader = new DefaultResourceLoader();
 
-All 1536 numbers are just floating-point values between roughly -1 and 1. The model learned through training on vast amounts of text that "certain geometric positions in 1536-dimensional space" correspond to "certain types of meaning".
+    // Load the tokenizer (0.7 MB JSON file defining the vocabulary)
+    this.tokenizer = HuggingFaceTokenizer.newInstance(
+            cache.getCachedResource(loader.getResource(TOKENIZER_URI)).getInputStream(),
+            Map.of());
 
-### 6.5 SimpleVectorStore — How Vectors Are Stored
+    // Create ONNX Runtime environment (one per JVM is sufficient)
+    this.environment = OrtEnvironment.getEnvironment();
 
-```java
-// Spring AI's SimpleVectorStore (simplified internal structure)
-public class SimpleVectorStore {
-    // in-memory: document id → {content, embedding float[], metadata Map}
-    private final Map<String, Document> store = new ConcurrentHashMap<>();
-
-    public void add(List<Document> documents) {
-        for (Document doc : documents) {
-            // 1. Call EmbeddingModel to compute the vector
-            float[] embedding = embeddingModel.embed(doc);
-            // 2. Attach the vector to the document
-            doc.setEmbedding(embedding);
-            // 3. Store in the HashMap with a UUID key
-            store.put(UUID.randomUUID().toString(), doc);
-        }
+    // Load the model (86 MB ONNX file) into an inference session
+    try (OrtSession.SessionOptions opts = new OrtSession.SessionOptions()) {
+        this.session = environment.createSession(
+                cache.getCachedResource(loader.getResource(MODEL_URI)).getContentAsByteArray(),
+                opts);
     }
 }
 ```
 
-This is **in-memory** which is why data is lost when the app restarts. For production you would use a real vector database like:
+**How `ResourceCacheService` works:**
 
-- **Pinecone** — cloud vector database
-- **Weaviate** — open source vector database
-- **pgvector** — PostgreSQL extension for vectors
-- **Milvus** — high-performance vector database
+`ResourceCacheService` (provided by the `spring-ai-transformers` module) is a cache-aside utility. It computes a deterministic UUID from the URL string, checks if `${tmpdir}/spring-ai-onnx-generative/{uuid}/filename` already exists, and returns the cached `Resource` if so — completely skipping the download. The UUID is computed once from the URL, so the same URL always maps to the same cache path across JVM restarts.
 
-Spring AI supports all of these through the same `VectorStore` interface — you'd just change the bean in `AiConfig.java`.
+**The inference method (`call`):**
 
-### 6.6 Metadata Tagging — The documentId Filter
+```java
+@Override
+public EmbeddingResponse call(EmbeddingRequest request) {
+    List<String> texts = request.getInstructions();
+
+    // Step 1: Tokenize all texts in one batch
+    Encoding[] encodings = tokenizer.batchEncode(texts.toArray(new String[0]));
+
+    // Step 2: Extract token ID arrays for ONNX input tensors
+    long[][] inputIds      = new long[encodings.length][];
+    long[][] attentionMask = new long[encodings.length][];
+    long[][] tokenTypeIds  = new long[encodings.length][];
+    for (int i = 0; i < encodings.length; i++) {
+        inputIds[i]      = encodings[i].getIds();
+        attentionMask[i] = encodings[i].getAttentionMask();
+        tokenTypeIds[i]  = encodings[i].getTypeIds();
+    }
+
+    // Step 3: Create ONNX tensors and run the model
+    try (OnnxTensor inputIdsTensor  = OnnxTensor.createTensor(environment, inputIds);
+         OnnxTensor maskTensor      = OnnxTensor.createTensor(environment, attentionMask);
+         OnnxTensor typeIdsTensor   = OnnxTensor.createTensor(environment, tokenTypeIds);
+         OrtSession.Result results  = session.run(Map.of(
+                 "input_ids",      inputIdsTensor,
+                 "attention_mask", maskTensor,
+                 "token_type_ids", typeIdsTensor))) {
+
+        // Step 4: Get the last_hidden_state output: shape [batch, seq_len, 384]
+        float[][][] tokenEmbeddings =
+            (float[][][]) results.get("last_hidden_state").get().getValue();
+
+        // Step 5: Mean pooling in pure Java
+        List<float[]> resultEmbeddings = new ArrayList<>();
+        for (int b = 0; b < tokenEmbeddings.length; b++) {
+            int seqLen = tokenEmbeddings[b].length;
+            int dim    = tokenEmbeddings[b][0].length;   // 384
+            float[] pooled = new float[dim];
+            float maskSum  = 0f;
+
+            for (int s = 0; s < seqLen; s++) {
+                float m = attentionMask[b][s];            // 1 for real tokens, 0 for padding
+                for (int d = 0; d < dim; d++) {
+                    pooled[d] += tokenEmbeddings[b][s][d] * m;
+                }
+                maskSum += m;
+            }
+
+            // Divide by the number of real (non-padding) tokens
+            float denom = Math.max(maskSum, 1e-9f);       // avoid division by zero
+            for (int d = 0; d < dim; d++) {
+                pooled[d] /= denom;
+            }
+            resultEmbeddings.add(pooled);
+        }
+
+        AtomicInteger idx = new AtomicInteger(0);
+        return new EmbeddingResponse(
+            resultEmbeddings.stream()
+                .map(e -> new Embedding(e, idx.getAndIncrement()))
+                .toList()
+        );
+    }
+}
+```
+
+**Key technical points:**
+- **Batch processing**: all texts are tokenized and embedded in a single ONNX session run — much faster than one-by-one
+- **try-with-resources on OnnxTensor**: ONNX tensors hold native memory; the `try` block ensures they are freed when done
+- **384 dimensions**: all-MiniLM-L6-v2 produces 384-dimensional embeddings (vs 1536 for OpenAI ada-002). Smaller but still excellent for semantic similarity
+
+### 7.6 SimpleVectorStore — How Vectors Are Stored
+
+```java
+// AiConfig.java
+@Bean
+public SimpleVectorStore vectorStore(EmbeddingModel embeddingModel) {
+    return SimpleVectorStore.builder(embeddingModel).build();
+}
+```
+
+`SimpleVectorStore` is Spring AI's in-memory vector store:
+
+```java
+// Simplified internal structure:
+public class SimpleVectorStore {
+    private final Map<String, Document> store = new ConcurrentHashMap<>();
+
+    public void add(List<Document> documents) {
+        for (Document doc : documents) {
+            float[] embedding = embeddingModel.embed(doc);  // calls OnnxEmbeddingModel
+            doc.setEmbedding(embedding);
+            store.put(UUID.randomUUID().toString(), doc);
+        }
+    }
+
+    public List<Document> similaritySearch(SearchRequest request) {
+        float[] queryVector = embeddingModel.embed(request.getQuery());
+        // Compute cosine similarity against ALL stored vectors
+        // Filter by metadata expression (e.g. documentId == "xyz")
+        // Return top-K results
+    }
+}
+```
+
+**Important:** This is **in-memory** — all vectors are lost when the app restarts. For production, replace `SimpleVectorStore` with a persistent vector database:
+
+| Vector Database | Spring AI Config |
+|---|---|
+| Pinecone | `spring-ai-pinecone-store` |
+| pgvector (PostgreSQL) | `spring-ai-pgvector-store` |
+| Weaviate | `spring-ai-weaviate-store` |
+| Milvus | `spring-ai-milvus-store` |
+
+All implement the same `VectorStore` interface — you'd only change the bean in `AiConfig.java`.
+
+### 7.7 Metadata Tagging — The documentId Filter
 
 ```java
 // DocumentService.java — Step 3
 String documentId = UUID.randomUUID().toString();
-// e.g.: "a4f9b2d1-3e8c-4c7f-b091-2a8e7d5f1e3c"
 
 chunks.forEach(chunk ->
     chunk.getMetadata().put("documentId", documentId)
 );
 ```
 
-Each chunk now looks like this in the store:
+Each stored chunk looks like this:
 
 ```
 Document {
-    content: "The contract shall be governed by...",
-    embedding: [0.23, -0.11, 0.84, ...],
-    metadata: {
-        "documentId": "a4f9b2d1-...",
-        "source": "contract.pdf"
+    text:      "The contract shall be governed by the laws of...",
+    embedding: [0.23, -0.11, 0.84, ...],   // float[384]
+    metadata:  {
+        "documentId": "a4f9b2d1-3e8c-4c7f-b091-2a8e7d5f1e3c",
+        "source":     "contract.pdf"
     }
 }
 ```
 
-This is critical for filtering. When the user uploads 10 documents, the vector store has hundreds of chunks from all of them. The `documentId` tag lets us say "when querying about doc A, only consider chunks from doc A" — not chunks from other documents.
+When you query with a specific `documentId`, the filter expression `"documentId == 'a4f9b2d1-...'"` limits the cosine similarity search to only the chunks from that document — even if dozens of other documents are also in the store.
 
 ---
 
-## 7. RAG Query Pipeline — The Full Flow
+## 8. RAG Query Pipeline — The Full Flow
 
 `POST /documents/{documentId}/query` with `{"question": "What are the payment terms?"}`
 
+### 8.1 Embedding the Question
+
 ```java
 // QueryService.java
-public QueryResponse query(String documentId, QueryRequest request) {
-
-    // Guard check
-    if (!documentService.documentExists(documentId)) {
-        throw new IllegalArgumentException("Document not found: " + documentId);
-        // → GlobalExceptionHandler → 404 response
-    }
-
-    // Steps 1-4 below...
-}
-```
-
-### 7.1 Embedding the Question
-
-```java
-// Step 1: The question is embedded using the SAME model that embedded the chunks
-// (MUST be same model — vectors are only comparable if from same embedding space)
-
-String filterExpression = "documentId == '" + documentId + "'";
 List<Document> relevantDocs = vectorStore.similaritySearch(
-    SearchRequest.query(request.question())   // ← this triggers embedding of the question
-        .withTopK(topK)                       // return top 4 most similar chunks
-        .withFilterExpression(filterExpression)  // only from this document
+    SearchRequest.builder()
+        .query(request.question())              // ← triggers embedding of the question
+        .topK(topK)                             // return top 4 most similar chunks
+        .filterExpression("documentId == '" + documentId + "'")
+        .build()
 );
 ```
 
-Internally, `SearchRequest.query(question)` causes:
+The question goes through exactly the same pipeline as the document chunks:
 
 ```
 "What are the payment terms?"
-    → EmbeddingModel.embed("What are the payment terms?")
-    → HTTP call to OpenAI ada-002
-    → float[] questionVector = [0.45, 0.12, -0.33, ...]
+    → HuggingFaceTokenizer.encode()
+    → OnnxEmbeddingModel.call()  (ONNX Runtime inference)
+    → mean pooling
+    → float[384] questionVector = [0.45, 0.12, -0.33, ...]
+
+(All of this happens locally — no internet call, no API cost)
 ```
 
-### 7.2 Cosine Similarity Search
+### 8.2 Cosine Similarity Search
 
 Now we have:
+- `questionVector` = the 384-dim embedding of the user's question
+- `chunkVectors` = all stored embeddings for this document
 
-- `questionVector` = the embedding of the user's question
-- `chunkVectors` = all the embeddings stored for this document
+`SimpleVectorStore` computes **cosine similarity** between the question vector and every chunk vector that matches the filter:
 
-SimpleVectorStore computes **cosine similarity** between the question vector and every chunk vector:
-
-```
-cosine_similarity(A, B) = (A · B) / (|A| × |B|)
+$$\text{cosine\_similarity}(A, B) = \frac{A \cdot B}{|A| \times |B|}$$
 
 Where:
-  A · B = sum of (A[i] × B[i]) for all i   (dot product)
-  |A|   = sqrt(sum of A[i]²)               (magnitude of A)
+- $A \cdot B = \sum_i A_i B_i$ — the dot product
+- $|A| = \sqrt{\sum_i A_i^2}$ — the magnitude (length) of vector A
 
-Result is between -1 and 1:
-  1.0  = identical meaning
-  0.0  = completely unrelated
-  -1.0 = opposite meaning
+Result is in $[-1, 1]$:
+- $1.0$ = identical meaning
+- $0.0$ = completely unrelated
+- $-1.0$ = opposite meaning
+
+**Why cosine similarity rather than Euclidean distance?**
+
+Euclidean distance is affected by the magnitude (length) of vectors. Two vectors that point in the same direction but one is longer would appear "far" from each other by Euclidean measure. Cosine similarity only cares about the angle — the direction in semantic space — not the magnitude. This makes it robust for text similarity.
+
+```
+Example (simplified to 2D):
+
+questionVector:  [0.60, 0.80]
+chunkA:          [0.65, 0.75]   → cosine ≈ 0.999  ✓ HIGH similarity
+chunkB:          [1.30, 1.50]   → cosine ≈ 0.999  ✓ Same direction, different magnitude
+chunkC:          [-0.30, 0.70]  → cosine ≈ 0.62   ✗ Lower similarity
 ```
 
-**Why cosine similarity and not Euclidean distance?**
+The top-K (default 4) chunks with the highest cosine similarity scores are returned.
 
-Euclidean distance measures the straight-line distance between two points in 1536-dimensional space. It is affected by the _magnitude_ of vectors. Cosine similarity only cares about the _angle_ between vectors — the direction in semantic space, not the length. This makes it more robust for text.
-
-```
-Example (simplified to 2D for illustration):
-
-questionVector:  [0.6, 0.8]    (points in some direction)
-chunkA:          [0.65, 0.75]  (similar direction → high cosine similarity = 0.99)
-chunkB:          [1.2, 1.6]    (same direction but longer → same cosine = 0.99)
-chunkC:          [-0.3, 0.7]   (different direction → lower cosine = ~0.62)
-```
-
-The top-K (top 4) chunks with highest cosine similarity are returned.
-
-### 7.3 Building the Augmented Prompt
+### 8.3 Building the Augmented Prompt
 
 ```java
-// Step 2: Build context string from the retrieved chunks
-String context = relevantDocs.stream()
-    .map(Document::getContent)
-    .collect(Collectors.joining("\n\n---\n\n"));
-
-// Example context string built:
-// "Payment is due within 30 days of invoice date...
-//  ---
-//  Late payments incur a 2% monthly interest charge...
-//  ---
-//  All payments must be made in USD..."
-```
-
-```java
-// Step 3: Build the full prompt
+// QueryService.java
 private static final String SYSTEM_PROMPT = """
     You are a helpful assistant that answers questions based on the provided context.
     Use ONLY the information from the context below to answer the question.
@@ -813,118 +884,139 @@ private static final String SYSTEM_PROMPT = """
     {context}
     """;
 
+// Build the context string from retrieved chunks
+String context = relevantDocs.stream()
+    .map(Document::getText)            // getText() is the Spring AI 1.1.4 API
+    .collect(Collectors.joining("\n\n---\n\n"));
+```
+
+The context string is the concatenation of the top-4 retrieved chunks:
+
+```
+"The term of this agreement is three years. Payment terms are Net-30...
+
+---
+
+Payment must be received within 30 days of invoice date. Wire transfers...
+
+---
+
+Late payments incur a 2% monthly interest charge starting on day 31...
+
+---
+
+All invoices must be sent electronically to the billing department email..."
+```
+
+### 8.4 Calling Google Gemini
+
+```java
+// QueryService.java
+ChatClient chatClient = ChatClient.builder(chatModel).build();
+
 String answer = chatClient.prompt()
     .system(s -> s.text(SYSTEM_PROMPT).param("context", context))
-    // Replaces {context} placeholder with the actual retrieved chunks
     .user(request.question())
-    // The user's original question
     .call()
     .content();
 ```
 
-**What actually gets sent to OpenAI's Chat API:**
+**What actually gets sent to Gemini's API:**
+
+The `ChatClient` translates the above into an HTTPS request to `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={API_KEY}`:
 
 ```json
 {
-  "model": "gpt-4o-mini",
-  "messages": [
-    {
-      "role": "system",
-      "content": "You are a helpful assistant that answers questions based on the provided context.\nUse ONLY the information from the context below to answer the question.\n...\n\nContext:\nPayment is due within 30 days...\n---\nLate payments incur a 2%...\n---\nAll payments must be in USD..."
-    },
+  "contents": [
     {
       "role": "user",
-      "content": "What are the payment terms?"
+      "parts": [{ "text": "What are the payment terms?" }]
     }
-  ]
+  ],
+  "systemInstruction": {
+    "parts": [{
+      "text": "You are a helpful assistant...\n\nContext:\n[4 retrieved chunks]"
+    }]
+  },
+  "generationConfig": {
+    "temperature": 0.7
+  }
 }
 ```
 
-The `system` message is instruction to the LLM about how to behave. The `user` message is the actual question. By putting the retrieved document chunks inside the `system` message as context, the LLM reads them before generating its answer.
-
-### 7.4 Calling the LLM
-
-OpenAI's GPT-4o-mini processes both messages and generates:
+**Gemini's response:**
 
 ```json
 {
-  "choices": [
-    {
-      "message": {
-        "role": "assistant",
-        "content": "Based on the document, the payment terms are as follows: payment is due within 30 days of the invoice date. Late payments incur a 2% monthly interest charge. All payments must be made in USD."
-      }
+  "candidates": [{
+    "content": {
+      "parts": [{
+        "text": "Based on the document, the payment terms are Net-30, meaning payment is due within 30 days of the invoice date. Late payments incur a 2% monthly interest charge starting on day 31. All invoices must be sent electronically to the billing department."
+      }]
     }
-  ]
+  }]
 }
 ```
 
-Spring AI's `ChatClient.call().content()` extracts just the `"content"` string from this response.
+Spring AI's `ChatClient.call().content()` extracts the text string from this response.
 
-**The final response returned to the client:**
+**The final response to the client:**
 
 ```json
 {
-  "answer": "Based on the document, the payment terms are as follows: payment is due within 30 days of the invoice date...",
+  "answer": "Based on the document, the payment terms are Net-30...",
   "question": "What are the payment terms?",
   "documentId": "a4f9b2d1-...",
   "relevantChunks": [
-    "Payment is due within 30 days of invoice date. The...",
-    "Late payments incur a 2% monthly interest charge p...",
-    "All payments must be made in USD. Wire transfers ar..."
+    "The term of this agreement is three years. Payment terms are Net-30...",
+    "Payment must be received within 30 days of invoice date...",
+    "Late payments incur a 2% monthly interest charge...",
+    "All invoices must be sent electronically..."
   ]
 }
 ```
 
-The `relevantChunks` field is the first 200 characters of each retrieved chunk — it lets you see exactly which parts of the document the answer was based on.
+The `relevantChunks` field shows you exactly which parts of the document Gemini read before generating the answer.
 
 ---
 
-## 8. Your Question: documentId vs Free Query, Multi-doc Search
+## 9. Per-Document vs Cross-Document Query
 
-### Why does the current query endpoint need a documentId?
+### Per-Document Query
 
 ```
 POST /documents/{documentId}/query
 ```
 
-The current design always filters by `documentId`:
+Filters the vector search to only chunks that belong to the specified document:
 
 ```java
-String filterExpression = "documentId == '" + documentId + "'";
-List<Document> relevantDocs = vectorStore.similaritySearch(
-    SearchRequest.query(request.question())
-        .withTopK(topK)
-        .withFilterExpression(filterExpression)  // ← only searches THIS document's chunks
-);
+SearchRequest.builder()
+    .query(request.question())
+    .topK(topK)
+    .filterExpression("documentId == '" + documentId + "'")
+    .build()
 ```
 
-**This means:** If you uploaded 3 documents:
+Use this when you want a precise answer from a specific document ("Tell me what clause 7 of this contract says").
 
-- doc-A: "Company policy document"
-- doc-B: "Employment contract"
-- doc-C: "Benefits handbook"
-
-And you query with doc-B's ID asking "What is the vacation policy?" — it will ONLY look through chunks from doc-B. Even if doc-C has a detailed vacation policy section, it won't find it.
-
-### Why is per-document querying sometimes useful?
-
-- You want a precise answer from a _specific_ document ("Tell me what clause 7 of this contract says")
-- You uploaded competing vendor proposals and want to ask each one independently
-- You want to avoid interference between unrelated documents
-
-### Cross-Document Query (now supported)
-
-The updated `QueryService` and `QueryController` now support **both modes**:
+### Cross-Document Query
 
 ```
-POST /documents/{documentId}/query  ← search only in one document
-POST /query                          ← search across ALL documents
+POST /query
 ```
 
-When querying across all documents, the filter expression is simply removed — the vector store searches all stored chunks regardless of which document they came from.
+No filter expression — searches all stored chunks from all uploaded documents:
 
-**When you send 3-4 docs and ask a general question:**
+```java
+SearchRequest.builder()
+    .query(request.question())
+    .topK(topK)
+    .build()
+// No filterExpression → searches across all documents
+```
+
+**Example with 3 uploaded documents:**
 
 ```
 Upload: doc-A (finance report), doc-B (HR policy), doc-C (product specs)
@@ -932,108 +1024,152 @@ Upload: doc-A (finance report), doc-B (HR policy), doc-C (product specs)
 POST /query  {"question": "What is the annual revenue?"}
 
 Step 1: Embed "What is the annual revenue?"
-Step 2: Search ALL chunks (doc-A + doc-B + doc-C combined)
-Step 3: Cosine similarity finds "revenue" chunks from doc-A → most relevant
-Step 4: LLM answers from those cross-document chunks
+Step 2: Cosine similarity search across ALL chunks (doc-A + doc-B + doc-C)
+Step 3: Finance report chunks score highest → top-4 from doc-A retrieved
+Step 4: Gemini answers from those chunks
 
-Result: The answer comes from whichever document(s) contained the most relevant text
+The answer comes from whichever document(s) contained the most relevant text.
 ```
 
-**Important caveat:** If doc-A says revenue is $5M and doc-C also mentions revenue as $3M (for a different product line), the LLM will receive both chunks and needs to reconcile them. The system prompt "use ONLY the context" handles this — the LLM will present both and acknowledge the discrepancy rather than picking one arbitrarily.
+**Note:** The vector store is in-memory and loses all data on restart. Re-upload documents after restarting the application.
 
 ---
 
-## 9. All Exposed API Endpoints
+## 10. All Exposed API Endpoints
 
-| Method | Path                    | Auth | Request                                      | Response                                                                      |
-| ------ | ----------------------- | ---- | -------------------------------------------- | ----------------------------------------------------------------------------- |
-| `POST` | `/auth/login`           | None | `{"username":"admin","password":"admin123"}` | `{"token":"eyJ...","username":"admin"}`                                       |
-| `POST` | `/documents/upload`     | JWT  | `multipart/form-data` with `file` field      | `{"documentId":"...","filename":"...","totalChunks":15,"message":"..."}`      |
-| `GET`  | `/documents`            | JWT  | none                                         | `[{"documentId":"...","filename":"...","chunks":15}]`                         |
-| `POST` | `/documents/{id}/query` | JWT  | `{"question":"..."}`                         | `{"answer":"...","question":"...","documentId":"...","relevantChunks":[...]}` |
-| `POST` | `/query`                | JWT  | `{"question":"..."}`                         | Same as above but searches all docs                                           |
+| Method | Path | Auth | Request | Response |
+|--------|------|------|---------|----------|
+| `POST` | `/auth/login` | None | `{"username":"admin","password":"admin123"}` | `{"token":"eyJ...","username":"admin"}` |
+| `POST` | `/documents/upload` | JWT | `multipart/form-data` with `file` field | `{"documentId":"...","filename":"...","totalChunks":15,"message":"..."}` |
+| `GET` | `/documents` | JWT | none | `[{"documentId":"...","filename":"...","chunks":15}]` |
+| `POST` | `/documents/{id}/query` | JWT | `{"question":"..."}` | `{"answer":"...","question":"...","documentId":"...","relevantChunks":[...]}` |
+| `POST` | `/query` | JWT | `{"question":"..."}` | Same as above (no documentId, searches all docs) |
+
+**Server runs on port `8082`** (configured by `server.port=8082`).
+
+**Example curl commands:**
+
+```bash
+# 1. Login
+TOKEN=$(curl -s -X POST http://localhost:8082/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username":"admin","password":"admin123"}' | jq -r .token)
+
+# 2. Upload a document
+curl -X POST http://localhost:8082/documents/upload \
+  -H "Authorization: Bearer $TOKEN" \
+  -F "file=@contract.pdf"
+
+# 3. Query a specific document (replace DOC_ID with actual UUID from step 2)
+curl -X POST http://localhost:8082/documents/$DOC_ID/query \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"question":"What are the payment terms?"}'
+
+# 4. List all uploaded documents
+curl http://localhost:8082/documents \
+  -H "Authorization: Bearer $TOKEN"
+
+# 5. Query across all documents
+curl -X POST http://localhost:8082/query \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"question":"What is the termination policy?"}'
+```
 
 **Error responses (from GlobalExceptionHandler):**
 
 ```json
 // 400 Bad Request (validation)
-{"error": "username: must not be blank", "timestamp": "2026-04-25T11:00:00"}
+{"error": "username: must not be blank", "timestamp": "2026-04-26T10:00:00"}
 
 // 401 Unauthorized (wrong password)
-{"error": "Invalid username or password", "timestamp": "2026-04-25T11:00:00"}
+{"error": "Invalid username or password", "timestamp": "2026-04-26T10:00:00"}
 
 // 404 Not Found (documentId not found)
-{"error": "Document not found: xyz-123", "timestamp": "2026-04-25T11:00:00"}
+{"error": "Document not found: xyz-123", "timestamp": "2026-04-26T10:00:00"}
 
 // 413 Payload Too Large (file > 10MB)
 {"error": "File size exceeds the maximum allowed size (10MB)", "timestamp": "..."}
+
+// 500 Internal Server Error
+{"error": "An unexpected error occurred. Please try again later.", "timestamp": "..."}
 ```
 
 ---
 
-## 10. Configuration — application.properties Explained
+## 11. Configuration — application.properties Explained
 
 ```properties
-# ── Server ──────────────────────────────
-server.port=8080
-# The embedded Tomcat starts on port 8080
+# ── Server ──────────────────────────────────────────────────
+spring.application.name=spring-rag-app
+server.port=8082
+# Embedded Tomcat starts on port 8082 (not the default 8080)
 
-# ── OpenAI ──────────────────────────────
-spring.ai.openai.api-key=${OPENAI_API_KEY:your-api-key-here}
-# ${ENV_VAR:default} syntax: use env variable OPENAI_API_KEY, or fallback to literal
-# NEVER hardcode real keys here (they'd be committed to git)
+# ── Google Gemini (Chat / Generation) ───────────────────────
+spring.ai.google.genai.api-key=AIzaSy...
+# Your Google AI Studio API key. Get one for free at: https://aistudio.google.com/
+# In production: use environment variable SPRING_AI_GOOGLE_GENAI_API_KEY instead of hardcoding
 
-spring.ai.openai.chat.options.model=gpt-4o-mini
-# gpt-4o-mini: fast, cheap. Change to gpt-4o for higher quality
+spring.ai.google.genai.chat.options.model=gemini-2.0-flash
+# The Gemini model to use for generation.
+# gemini-2.0-flash = fast, cheap, excellent quality
+# gemini-1.5-pro   = slower but higher reasoning capability
 
-spring.ai.openai.chat.options.temperature=0.7
-# 0.0 = very deterministic, same question → same answer every time
+spring.ai.google.genai.chat.options.temperature=0.7
+# 0.0 = very deterministic (same question → same answer)
 # 1.0 = very creative/random
 # 0.7 = balanced — good for factual RAG
 
-spring.ai.openai.embedding.options.model=text-embedding-ada-002
-# The embedding model — DO NOT change this after storing vectors
-# Vectors from different models are not comparable
+# ── ONNX Embedding Model (Local) ────────────────────────────
+spring.ai.embedding.transformer.enabled=false
+# Disables Spring AI's default transformer embedding auto-configuration.
+# We use our own OnnxEmbeddingModel bean defined in AiConfig.java instead.
+spring.main.allow-bean-definition-overriding=true
+# Allows our custom EmbeddingModel bean to override any conflicting auto-configured bean.
 
-# ── JWT ──────────────────────────────────
+# ── JWT ─────────────────────────────────────────────────────
 app.jwt.secret=404E635266556A586E3272357538782F413F4428472B4B6250645367566B5970
-# A 256-bit key in hex. In production: use environment variable or secrets manager.
-# NEVER commit a real production key to source control.
+# 256-bit key in hex. In production: use environment variable or secrets manager.
 
 app.jwt.expiration-ms=3600000
-# 3600000 milliseconds = 1 hour. Tokens expire after 1 hour.
+# 3,600,000 milliseconds = 1 hour. Tokens expire after 1 hour.
 
-# ── File Upload ──────────────────────────
+# ── File Upload ─────────────────────────────────────────────
 spring.servlet.multipart.max-file-size=10MB
 spring.servlet.multipart.max-request-size=10MB
 
-# ── RAG Tuning ───────────────────────────
+# ── RAG Tuning ──────────────────────────────────────────────
 app.rag.chunk-size=800
-# Tokens per chunk. Larger = more context per chunk but less precise retrieval.
-# Smaller = more precise but may split sentences mid-thought.
+# Tokens per chunk. Larger = more context per chunk, less precise retrieval.
+# Smaller = more precise, but may split sentences mid-thought.
 
 app.rag.chunk-overlap=100
 # Tokens shared between adjacent chunks. Prevents information loss at boundaries.
 
 app.rag.top-k=4
-# How many chunks to retrieve per query.
-# More chunks = more context for LLM but higher token cost and potential noise.
+# Number of chunks to retrieve per query.
+# More chunks = more context for Gemini but higher token cost and potential noise.
 ```
 
 ---
 
-## 11. How Every Class Fits Together (Dependency Map)
+## 12. How Every Class Fits Together (Dependency Map)
 
 ```
 Spring Boot App starts up
          │
          ├── AiConfig.java
-         │     └── creates: SimpleVectorStore(EmbeddingModel)
-         │                  EmbeddingModel ← auto-configured by OpenAI starter
+         │     ├── creates: OnnxEmbeddingModel  @Bean @Primary
+         │     │    ├─ ResourceCacheService (loads files from cache or downloads once)
+         │     │    ├─ HuggingFaceTokenizer (from tokenizer.json)
+         │     │    └─ OrtSession (from model.onnx via ONNX Runtime)
+         │     └── creates: SimpleVectorStore(embeddingModel)
          │
          ├── UserConfig.java
-         │     └── creates: PasswordEncoder (BCrypt)
-         │     └── creates: UserDetailsService (InMemoryUserDetailsManager)
+         │     ├── creates: PasswordEncoder (BCryptPasswordEncoder)
+         │     ├── creates: UserDetailsService (InMemoryUserDetailsManager)
+         │     │            users: admin/admin123, user/user123
          │     └── creates: AuthenticationProvider (DaoAuthenticationProvider)
          │
          ├── JwtService.java  (@Service)
@@ -1046,21 +1182,24 @@ Spring Boot App starts up
          │     └── needs: JwtAuthenticationFilter, AuthenticationProvider
          │     └── creates: SecurityFilterChain, AuthenticationManager
          │
-         ├── AuthController.java (@RestController)
+         ├── AuthController.java (@RestController, path: /auth)
          │     └── needs: AuthenticationManager, JwtService, UserDetailsService
          │
          ├── DocumentService.java (@Service)
          │     └── needs: SimpleVectorStore
-         │     └── owns: ConcurrentHashMap<documentId, DocumentInfo>
+         │     └── owns: ConcurrentHashMap<documentId → DocumentInfo>
          │
-         ├── DocumentController.java (@RestController)
+         ├── DocumentController.java (@RestController, path: /documents)
          │     └── needs: DocumentService
          │
          ├── QueryService.java (@Service)
-         │     └── needs: SimpleVectorStore, ChatModel, DocumentService
-         │     └── creates: ChatClient (wraps ChatModel)
+         │     └── needs: SimpleVectorStore, ChatModel (Gemini), DocumentService
+         │     └── creates ChatClient per request (wraps ChatModel)
          │
-         ├── QueryController.java (@RestController)
+         ├── QueryController.java (@RestController, path: /documents/{id}/query)
+         │     └── needs: QueryService
+         │
+         ├── GlobalQueryController.java (@RestController, path: /query)
          │     └── needs: QueryService
          │
          └── GlobalExceptionHandler.java (@RestControllerAdvice)
@@ -1069,35 +1208,31 @@ Spring Boot App starts up
 
 ---
 
-## 12. End-to-End Request Traces
+## 13. End-to-End Request Traces
 
 ### Trace 1: Login
 
 ```
-curl -X POST /auth/login -d '{"username":"admin","password":"admin123"}'
-
-[HTTP Layer]
-  Tomcat receives request → passes to Spring DispatcherServlet
+POST /auth/login  {"username":"admin","password":"admin123"}
 
 [Filter Chain]
   JwtAuthenticationFilter:
-    authHeader == null → skip → proceed to chain
+    Authorization header is null → skip → proceed to chain
   AuthorizationFilter:
-    request URI is "/auth/login" → matches permitAll() → allowed without auth
+    URI matches "/auth/**" → permitAll() → allowed without authentication
 
 [Controller]
-  AuthController.login() called
-    @Valid → validates NotBlank on username and password → passes
-    authenticationManager.authenticate(UsernamePasswordAuthToken("admin","admin123"))
-      → DaoAuthenticationProvider.authenticate()
-        → UserDetailsService.loadUserByUsername("admin")
-        → BCryptPasswordEncoder.matches("admin123", "$2a$10$xyz...")
-        → matches! → returns authenticated token
+  AuthController.login()
+    @Valid validates @NotBlank on username and password → passes
 
-    UserDetails = loadUserByUsername("admin")
+    authenticationManager.authenticate(UsernamePasswordAuthToken("admin","admin123"))
+      → DaoAuthenticationProvider:
+          UserDetailsService.loadUserByUsername("admin")  → UserDetails(admin, ROLE_ADMIN)
+          BCryptPasswordEncoder.matches("admin123", "$2a$10$...")  → true ✓
+
     token = jwtService.generateToken(userDetails)
-      → Jwts.builder().subject("admin").expiration(+1hr).signWith(key).compact()
-      → "eyJhbGci..."
+      → Jwts.builder().subject("admin")...signWith(secretKey).compact()
+      → "eyJhbGciOiJIUzM4NCJ9.eyJzdWIiOiJhZG1pbi..."
 
 [Response]
   200 OK: {"token":"eyJhbGci...","username":"admin"}
@@ -1106,127 +1241,88 @@ curl -X POST /auth/login -d '{"username":"admin","password":"admin123"}'
 ### Trace 2: Document Upload
 
 ```
-curl -X POST /documents/upload \
-  -H "Authorization: Bearer eyJhbGci..." \
-  -F "file=@contract.pdf"
+POST /documents/upload
+  Authorization: Bearer eyJhbGci...
+  Content-Type: multipart/form-data
+  Body: (PDF bytes)
 
 [Filter Chain]
   JwtAuthenticationFilter:
-    authHeader = "Bearer eyJhbGci..."
     jwt = "eyJhbGci..."
     username = jwtService.extractUsername(jwt) → "admin"
     userDetails = loadUserByUsername("admin")
-    jwtService.isTokenValid(jwt, userDetails) → true
-    SecurityContext.setAuthentication(adminToken) ← user is now authenticated
-
+    jwtService.isTokenValid(jwt, userDetails) → true ✓
+    SecurityContext.setAuthentication(adminToken)
   AuthorizationFilter:
-    anyRequest().authenticated() → admin is authenticated → allowed
+    anyRequest().authenticated() → admin is authenticated → allowed ✓
 
-[Controller]
-  DocumentController.uploadDocument() called
-    file.isEmpty() → false → proceed
-    documentService.ingestDocument(file)
+[Controller → Service]
+  documentId = "a4f9b2d1-3e8c-4c7f-b091-2a8e7d5f1e3c"
 
-[Service]
-  documentId = "a4f9b2d1-3e8c-4c7f-b091-2a8e7d5f1e3c" (random UUID)
+  PARSE: TikaDocumentReader reads PDF → "Contract between Company A..."
+  CHUNK: TokenTextSplitter → 8 chunks of ~800 tokens each
+  TAG:   each chunk.metadata["documentId"] = "a4f9b2d1-..."
 
-  Step 1 PARSE:
-    TikaDocumentReader reads PDF bytes → "Contract between Company A and Company B..."
-    rawDocuments = [Document("Contract between Company A...")]
-
-  Step 2 CHUNK:
-    splitter.apply(rawDocuments)
-    Chunk 0: "Contract between Company A and Company B, dated January 1..."
-    Chunk 1: "dated January 1, 2025. The term of this agreement is..."
-    Chunk 2: "agreement is three years from execution. Payment terms..."
-    ... (say 8 chunks total)
-
-  Step 3 TAG:
-    Each chunk.metadata["documentId"] = "a4f9b2d1-..."
-
-  Step 4 EMBED:
-    HTTP POST to OpenAI /v1/embeddings with 8 chunk texts
-    Returns 8 vectors, each float[1536]
-
-  Step 5 STORE:
-    SimpleVectorStore.add(chunks)
-    Internal HashMap: {uuid1 → Chunk0+vector, uuid2 → Chunk1+vector, ...}
+  EMBED: vectorStore.add(chunks)
+    → For each chunk:
+         OnnxEmbeddingModel.call([chunkText])
+           → HuggingFaceTokenizer.encode()  → token IDs
+           → OrtSession.run()               → last_hidden_state [1, seqLen, 384]
+           → mean pooling                   → float[384]
+    → SimpleVectorStore stores 8 Document objects with their vectors
+    (All local — no network call, no API cost)
 
   documentStore["a4f9b2d1-..."] = {documentId, "contract.pdf", 8 chunks}
 
 [Response]
-  200 OK: {"documentId":"a4f9b2d1-...","filename":"contract.pdf","totalChunks":8,"message":"..."}
+  200 OK: {"documentId":"a4f9b2d1-...","filename":"contract.pdf","totalChunks":8,"message":"Document indexed successfully"}
 ```
 
-### Trace 3: Query
+### Trace 3: Document Query
 
 ```
-curl -X POST /documents/a4f9b2d1-.../query \
-  -H "Authorization: Bearer eyJhbGci..." \
-  -d '{"question":"What are the payment terms?"}'
+POST /documents/a4f9b2d1-.../query
+  Authorization: Bearer eyJhbGci...
+  {"question":"What are the payment terms?"}
 
-[Filter Chain + Auth] (same as trace 2)
+[Filter Chain + Auth — same as Trace 2]
 
-[Controller]
-  QueryController.queryDocument("a4f9b2d1-...", QueryRequest("What are the payment terms?"))
-    queryService.query(documentId, request)
+[Controller → Service]
+  documentService.documentExists("a4f9b2d1-...") → true ✓
 
-[Service]
-  documentService.documentExists("a4f9b2d1-...") → true
+  EMBED QUESTION:
+    OnnxEmbeddingModel.call(["What are the payment terms?"])
+      → tokenize → ONNX inference → mean pool → float[384] questionVector
 
-  Step 1 SIMILARITY SEARCH:
-    SearchRequest.query("What are the payment terms?")
-      → embed("What are the payment terms?")
-      → HTTP call to OpenAI ada-002
-      → questionVector = [0.45, 0.12, -0.33, ...]
+  SIMILARITY SEARCH:
+    SimpleVectorStore iterates all chunks with documentId == "a4f9b2d1-...":
+      Chunk 0 (parties):    cosine = 0.31  ✗
+      Chunk 2 (payment):    cosine = 0.89  ✓ TOP
+      Chunk 5 (term):       cosine = 0.28  ✗
+      Chunk 6 (due dates):  cosine = 0.85  ✓ TOP
+      Chunk 7 (late fees):  cosine = 0.78  ✓ TOP
+      Chunk 3 (gov. law):   cosine = 0.22  ✗
+      Chunk 1 (definitions):cosine = 0.65  ✓ 4th
+    Returns top-4: [Chunk2, Chunk6, Chunk7, Chunk1]
 
-    SimpleVectorStore iterates all stored chunks:
-      For each chunk where metadata["documentId"] == "a4f9b2d1-...":
-        score = cosineSimilarity(questionVector, chunkVector)
+  BUILD CONTEXT:
+    context = Chunk2.text + "\n---\n" + Chunk6.text + "\n---\n" + Chunk7.text + ...
 
-      Scores:
-        Chunk 0 (contract parties): 0.31  ← low similarity
-        Chunk 2 (payment terms):    0.89  ← HIGH similarity! ✓
-        Chunk 5 (termination):      0.28  ← low
-        Chunk 6 (payment due):      0.85  ← HIGH similarity! ✓
-        Chunk 7 (late fees):        0.78  ← high similarity ✓
-        Chunk 3 (governing law):    0.22  ← low
+  CALL GEMINI:
+    HTTPS POST to generativelanguage.googleapis.com:
+      systemInstruction: "You are a helpful assistant... Context: [4 chunks]"
+      user message:      "What are the payment terms?"
 
-      Top-4: Chunk2(0.89), Chunk6(0.85), Chunk7(0.78), Chunk4(0.65)
-
-  Step 2 BUILD CONTEXT:
-    context = "agreement is three years from execution. Payment terms are Net-30...\n---\n
-               Payment due within 30 days of invoice...\n---\n
-               Late payments incur 2% monthly interest...\n---\n
-               ..."
-
-  Step 3 CALL LLM:
-    HTTP POST to OpenAI /v1/chat/completions:
-    {
-      "model": "gpt-4o-mini",
-      "messages": [
-        {"role":"system", "content":"You are a helpful assistant...Context:\n[4 chunks]"},
-        {"role":"user", "content":"What are the payment terms?"}
-      ]
-    }
-
-    OpenAI responds:
-    "Based on the contract, payment terms are Net-30, meaning payment is due within
-     30 days of invoice date. Late payments accrue 2% monthly interest. All
-     payments must be made in USD."
+    Gemini responds:
+      "Based on the document, the payment terms are Net-30..."
 
 [Response]
   200 OK:
   {
-    "answer": "Based on the contract, payment terms are Net-30...",
-    "question": "What are the payment terms?",
-    "documentId": "a4f9b2d1-...",
-    "relevantChunks": [
-      "agreement is three years from execution. Payment terms are Net-30...",
-      "Payment due within 30 days of invoice date. Wire transfer...",
-      "Late payments incur 2% monthly interest. This applies...",
-      "invoices are sent electronically to the billing address..."
-    ]
+    "answer":        "Based on the document, payment terms are Net-30...",
+    "question":      "What are the payment terms?",
+    "documentId":    "a4f9b2d1-...",
+    "relevantChunks":["The term of this agreement...", "Payment due within 30 days...", ...]
   }
 ```
 
@@ -1235,45 +1331,54 @@ curl -X POST /documents/a4f9b2d1-.../query \
 ## Summary: The Complete Mental Model
 
 ```
-Your PDF/DOCX                    Your Question
-     │                                │
-     ▼                                ▼
-[Tika] extract text          [OpenAI ada-002] embed question
-     │                                │
-     ▼                                ▼
-[Splitter] 800-token chunks    questionVector [0.45, 0.12, ...]
-     │
-     ▼
-[OpenAI ada-002] embed each chunk
-     │
-     ▼
-[SimpleVectorStore] store {chunk_text, float[1536], metadata}
-
-─────────────────────────── AT QUERY TIME ───────────────────────────
-
-questionVector ──► cosine similarity against all chunk vectors
-                         │
-                         ▼
-               top-4 most similar chunks
-                         │
-                         ▼
-        system prompt: "Answer using ONLY this context: [4 chunks]"
-        user turn:     "What are the payment terms?"
-                         │
-                         ▼
-                   [GPT-4o-mini]
-                         │
-                         ▼
-           Grounded, accurate, no hallucination
+Your PDF/DOCX/TXT                   Your Question
+      │                                   │
+      ▼                                   ▼
+ [Apache Tika]                    [OnnxEmbeddingModel]
+  extract text                     tokenize + ONNX inference
+      │                            + mean pooling (pure Java)
+      ▼                                   │
+ [TokenTextSplitter]                      ▼
+  800-token chunks             questionVector  float[384]
+      │                                   │
+      ▼                                   │
+ [OnnxEmbeddingModel]                     │
+  tokenize + ONNX inference               │
+  + mean pooling (pure Java)              │
+      │                                   │
+      ▼                                   │
+  chunkVector  float[384]                 │
+      │                                   │
+      ▼                                   │
+ [SimpleVectorStore]  ◄──── cosine similarity ────┘
+  in-memory HashMap         score each chunk
+      │                     return top-4
+      │                          │
+      ▼                          ▼
+  {chunk_text,          [top-4 relevant chunks]
+   float[384],                   │
+   metadata}                     ▼
+                    system: "Answer using ONLY: [4 chunks]"
+                    user:   "What are the payment terms?"
+                                 │
+                                 ▼
+                       [Google Gemini 2.0 Flash]
+                    (HTTPS call to Google's API)
+                                 │
+                                 ▼
+                     Grounded, accurate answer
+                     (no hallucination because
+                      LLM can only use the context)
 ```
 
-The power of RAG is in this combination:
+**The two cost dimensions:**
+- **Embedding**: 100% free, runs locally on your CPU (no API call, no tokens, no quota)
+- **Generation**: Calls Gemini API — uses your API quota. The free tier is generous for development.
 
-- **Embeddings** handle semantic similarity (synonyms, paraphrases)
-- **Vector search** retrieves the right pieces at scale
-- **LLM** synthesizes retrieved pieces into a coherent natural-language answer
-- **Metadata filtering** keeps documents isolated or allows cross-document search
+**Why ONNX for embeddings?**
+
+The `all-MiniLM-L6-v2` model is a lightweight (22M parameters) Transformer that was specifically distilled for producing high-quality sentence embeddings. The ONNX format is a portable, optimized model format that can be run by the ONNX Runtime library in Java — no Python, no PyTorch, no GPU required. The model loads in ~2 seconds and embeds text in milliseconds.
 
 ---
 
-_This project is intentionally minimal and designed for learning. Production RAG systems add: persistent vector databases, chunking strategy tuning, reranking (a second model that re-scores retrieved chunks), query expansion, conversation history, and evaluation frameworks._
+_This project is intentionally minimal and designed for learning. Production RAG systems add: persistent vector databases (pgvector, Milvus, Weaviate), chunking strategy tuning, reranking (a second model that re-scores retrieved chunks), query expansion, conversation history, streaming responses, and evaluation frameworks._

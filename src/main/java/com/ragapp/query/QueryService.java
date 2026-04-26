@@ -48,9 +48,11 @@ public class QueryService {
         // 1. Similarity search — retrieve relevant chunks filtered by documentId
         String filterExpression = "documentId == '" + documentId + "'";
         List<Document> relevantDocs = vectorStore.similaritySearch(
-                SearchRequest.query(request.question())
-                        .withTopK(topK)
-                        .withFilterExpression(filterExpression)
+                SearchRequest.builder()
+                        .query(request.question())
+                        .topK(topK)
+                        .filterExpression(filterExpression)
+                        .build()
         );
 
         return buildResponse(documentId, request.question(), relevantDocs);
@@ -64,8 +66,10 @@ public class QueryService {
     public QueryResponse queryAllDocuments(QueryRequest request) {
         // No filter expression — search across every chunk in the vector store
         List<Document> relevantDocs = vectorStore.similaritySearch(
-                SearchRequest.query(request.question())
-                        .withTopK(topK)
+                SearchRequest.builder()
+                        .query(request.question())
+                        .topK(topK)
+                        .build()
         );
 
         return buildResponse("ALL_DOCUMENTS", request.question(), relevantDocs);
@@ -74,7 +78,7 @@ public class QueryService {
     private QueryResponse buildResponse(String scope, String question, List<Document> relevantDocs) {
         // 2. Build context from retrieved chunks
         String context = relevantDocs.stream()
-                .map(Document::getContent)
+                .map(Document::getText)
                 .collect(Collectors.joining("\n\n---\n\n"));
 
         // 3. Build prompt and call LLM
@@ -87,7 +91,7 @@ public class QueryService {
         // 4. Return structured response (show first 200 chars of each chunk)
         List<String> chunks = relevantDocs.stream()
                 .map(doc -> {
-                    String content = doc.getContent();
+                    String content = doc.getText();
                     return content.substring(0, Math.min(content.length(), 200)) + "...";
                 })
                 .toList();
