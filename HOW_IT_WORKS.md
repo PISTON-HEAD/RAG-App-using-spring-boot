@@ -1,7 +1,7 @@
 # Spring Boot RAG Application — Complete Technical Guide
 
-> **Goal of this document:** Teach you everything about this project at the code level — for someone who is new to RAG, Spring Boot, LLMs, and vector embeddings.  
-> From an HTTP request arriving at the server, through authentication, document parsing, embedding, vector storage, similarity search, and LLM answer generation — every single step explained.
+> **Goal of this document:** Teach you everything about this project at the code level — for someone who is new to RAG, Spring Boot, LLMs, and vector embeddings.
+> From an HTTP request arriving at the server, through authentication, document parsing, embedding, vector storage, similarity search, and LLM answer generation — every single step is explained with the actual code from this project.
 
 ---
 
@@ -24,18 +24,20 @@
    - 7.3 [What is a Vector / Embedding?](#73-what-is-a-vector--embedding)
    - 7.4 [How Text Becomes a Vector — ONNX Deep Dive](#74-how-text-becomes-a-vector--onnx-deep-dive)
    - 7.5 [OnnxEmbeddingModel — The Custom Class Explained](#75-onnxembeddingmodel--the-custom-class-explained)
-   - 7.6 [SimpleVectorStore — How Vectors Are Stored](#76-simplevectorstore--how-vectors-are-stored)
-   - 7.7 [Metadata Tagging — The documentId Filter](#77-metadata-tagging--the-documentid-filter)
+   - 7.6 [AiConfig — Wiring It All Together](#76-aiconfig--wiring-it-all-together)
+   - 7.7 [SimpleVectorStore — How Vectors Are Stored](#77-simplevectorstore--how-vectors-are-stored)
+   - 7.8 [Metadata Tagging — The documentId Filter](#78-metadata-tagging--the-documentid-filter)
 8. [RAG Query Pipeline — The Full Flow](#8-rag-query-pipeline--the-full-flow)
    - 8.1 [Embedding the Question](#81-embedding-the-question)
    - 8.2 [Cosine Similarity Search](#82-cosine-similarity-search)
    - 8.3 [Building the Augmented Prompt](#83-building-the-augmented-prompt)
    - 8.4 [Calling Google Gemini](#84-calling-google-gemini)
 9. [Per-Document vs Cross-Document Query](#9-per-document-vs-cross-document-query)
-10. [All Exposed API Endpoints](#10-all-exposed-api-endpoints)
-11. [Configuration — application.properties Explained](#11-configuration--applicationproperties-explained)
-12. [How Every Class Fits Together (Dependency Map)](#12-how-every-class-fits-together-dependency-map)
-13. [End-to-End Request Traces](#13-end-to-end-request-traces)
+10. [Common RAG Failure Modes](#10-common-rag-failure-modes)
+11. [All Exposed API Endpoints](#11-all-exposed-api-endpoints)
+12. [Configuration — application.properties Explained](#12-configuration--applicationproperties-explained)
+13. [How Every Class Fits Together (Dependency Map)](#13-how-every-class-fits-together-dependency-map)
+14. [End-to-End Request Traces](#14-end-to-end-request-traces)
 
 ---
 
@@ -63,10 +65,38 @@ The LLM is not guessing. It reads your document's relevant parts and summarizes 
 **The three pillars of RAG:**
 
 | Pillar | What it does | Technology in this app |
-|--------|-------------|------------------------|
-| **Retrieval** | Find relevant text from your documents | ONNX all-MiniLM-L6-v2 + SimpleVectorStore |
-| **Augmentation** | Combine retrieved text with the question | `QueryService.buildResponse()` |
-| **Generation** | Produce a fluent, grounded answer | Google Gemini 2.0 Flash |
+|---|---|---|
+| **Retrieval** | Find the most relevant text passages from your documents | ONNX all-MiniLM-L6-v2 (local) + SimpleVectorStore |
+| **Augmentation** | Combine the retrieved passages with the user's question into a structured prompt | `QueryService.buildResponse()` |
+| **Generation** | Read the prompt (question + retrieved context) and produce a fluent, grounded answer | Google Gemini 2.0 Flash (cloud) |
+
+### Why Semantic Search (not keyword search)?
+
+Traditional keyword search looks for exact words. If a document says "termination requires 60 days notice" and you search "how long is the notice period", keyword search finds nothing — none of the words overlap.
+
+RAG uses **semantic search** (vector similarity search). Both phrases get converted to lists of numbers (vectors). Because they refer to the same concept, their vectors are geometrically close in 384-dimensional space. The search finds the right passage even with zero keyword overlap.
+
+### The Two Phases of RAG
+
+RAG has two clearly separated phases:
+
+```
+╔══════════════════════════════════════════════════════════════╗
+║  INGESTION PHASE (done once per document, at upload time)    ║
+║                                                              ║
+║  Document → Parse → Chunk → Embed → Store in vector DB       ║
+║                                   (all local, free, fast)    ║
+╚══════════════════════════════════════════════════════════════╝
+
+╔══════════════════════════════════════════════════════════════╗
+║  QUERY PHASE (done every time a user asks a question)        ║
+║                                                              ║
+║  Question → Embed → Similarity Search → Retrieve top-K      ║
+║          → Build prompt → Send to Gemini → Return answer     ║
+╚══════════════════════════════════════════════════════════════╝
+```
+
+The ingestion phase is expensive (file parsing, many embeddings) but runs only once per document. The query phase is fast: embed the question (milliseconds), search the vector store (milliseconds), call Gemini (1–3 seconds).
 
 ---
 
@@ -149,18 +179,18 @@ spring-rag-app/
 
 **Dependencies (from pom.xml) and why each one is there:**
 
-| Dependency | Why We Need It |
-|---|---|
-| `spring-boot-starter-web` | HTTP server (Tomcat), REST controllers, JSON serialization |
-| `spring-boot-starter-security` | Security filter chain, `@EnableWebSecurity`, `AuthenticationManager` |
-| `spring-ai-starter-model-google-genai` | Auto-configures `ChatModel` for Google Gemini via REST API |
-| `spring-ai-starter-model-transformers` | Provides `ResourceCacheService`, `HuggingFaceTokenizer`, ONNX infra classes |
-| `spring-ai-vector-store` | `SimpleVectorStore` — in-memory vector store |
-| `spring-ai-tika-document-reader` | Apache Tika — extracts text from PDF, DOCX, TXT, HTML, etc. |
-| `jjwt-api` + `jjwt-impl` + `jjwt-jackson` | JWT token creation and parsing |
-| `spring-boot-starter-validation` | `@NotBlank` and `@Valid` on request DTOs |
-| `onnxruntime` (transitive) | Microsoft ONNX Runtime — actually runs the embedding model in Java |
-| `tokenizers` (transitive, DJL) | HuggingFace Rust tokenizer — converts text to token IDs |
+| Dependency                                | Why We Need It                                                              |
+| ----------------------------------------- | --------------------------------------------------------------------------- |
+| `spring-boot-starter-web`                 | HTTP server (Tomcat), REST controllers, JSON serialization                  |
+| `spring-boot-starter-security`            | Security filter chain, `@EnableWebSecurity`, `AuthenticationManager`        |
+| `spring-ai-starter-model-google-genai`    | Auto-configures `ChatModel` for Google Gemini via REST API                  |
+| `spring-ai-starter-model-transformers`    | Provides `ResourceCacheService`, `HuggingFaceTokenizer`, ONNX infra classes |
+| `spring-ai-vector-store`                  | `SimpleVectorStore` — in-memory vector store                                |
+| `spring-ai-tika-document-reader`          | Apache Tika — extracts text from PDF, DOCX, TXT, HTML, etc.                 |
+| `jjwt-api` + `jjwt-impl` + `jjwt-jackson` | JWT token creation and parsing                                              |
+| `spring-boot-starter-validation`          | `@NotBlank` and `@Valid` on request DTOs                                    |
+| `onnxruntime` (transitive)                | Microsoft ONNX Runtime — actually runs the embedding model in Java          |
+| `tokenizers` (transitive, DJL)            | HuggingFace Rust tokenizer — converts text to token IDs                     |
 
 ---
 
@@ -421,10 +451,10 @@ public ResponseEntity<LoginResponse> login(@Valid @RequestBody LoginRequest requ
 
 **Default users (in-memory, no database):**
 
-| Username | Password | Role |
-|----------|----------|------|
-| `admin` | `admin123` | `ROLE_ADMIN` |
-| `user` | `user123` | `ROLE_USER` |
+| Username | Password   | Role         |
+| -------- | ---------- | ------------ |
+| `admin`  | `admin123` | `ROLE_ADMIN` |
+| `user`   | `user123`  | `ROLE_USER`  |
 
 ---
 
@@ -489,14 +519,14 @@ List<Document> rawDocuments = reader.get();
 
 Tika detects the file type and extracts text:
 
-| File Type | What Tika does |
-|-----------|----------------|
-| `.pdf` | Uses PDFBox to extract text from each page |
-| `.docx` | Unzips Office Open XML, reads `word/document.xml` |
-| `.txt` | Reads as-is |
-| `.html` | Parses HTML tags, extracts visible text |
-| `.xlsx` | Reads cell values |
-| `.pptx` | Reads slide text |
+| File Type | What Tika does                                    |
+| --------- | ------------------------------------------------- |
+| `.pdf`    | Uses PDFBox to extract text from each page        |
+| `.docx`   | Unzips Office Open XML, reads `word/document.xml` |
+| `.txt`    | Reads as-is                                       |
+| `.html`   | Parses HTML tags, extracts visible text           |
+| `.xlsx`   | Reads cell values                                 |
+| `.pptx`   | Reads slide text                                  |
 
 The result is a `List<Document>` — Spring AI's wrapper around extracted text.
 
@@ -617,6 +647,7 @@ The Transformer outputs one vector per input token. We need one vector per sente
 Spring AI's `TransformersEmbeddingModel` does tokenization and mean pooling via DJL (Deep Java Library). DJL's mean-pooling code downloads PyTorch native binaries (a ~200 MB download) on first use. In a corporate network environment where SSL certificate inspection blocks connections to `download.pytorch.org`, this download fails with an SSL handshake error, and the application crashes.
 
 Our `OnnxEmbeddingModel`:
+
 - Uses **ONNX Runtime** directly (already on the classpath via `onnxruntime` JAR) for model inference
 - Uses **HuggingFace tokenizer** (via DJL's `tokenizers` module — a pre-compiled Rust library that does NOT need to download anything) for tokenization
 - Implements **mean pooling in pure Java** — no native PyTorch, no internet download
@@ -730,11 +761,65 @@ public EmbeddingResponse call(EmbeddingRequest request) {
 ```
 
 **Key technical points:**
+
 - **Batch processing**: all texts are tokenized and embedded in a single ONNX session run — much faster than one-by-one
 - **try-with-resources on OnnxTensor**: ONNX tensors hold native memory; the `try` block ensures they are freed when done
 - **384 dimensions**: all-MiniLM-L6-v2 produces 384-dimensional embeddings (vs 1536 for OpenAI ada-002). Smaller but still excellent for semantic similarity
 
-### 7.6 SimpleVectorStore — How Vectors Are Stored
+**The three overloaded `embed` entry points:**
+
+`OnnxEmbeddingModel` also overrides two convenience methods that the `VectorStore` and `DocumentService` call internally:
+
+```java
+// Called by SimpleVectorStore.add() for each Document during ingestion
+@Override
+public float[] embed(Document document) {
+    return embed(document.getText());  // delegates to embed(String)
+}
+
+// Called for single-string embedding (used by embed(Document) above)
+@Override
+public List<float[]> embed(List<String> texts) {
+    return call(new EmbeddingRequest(texts, EmbeddingOptions.builder().build()))
+            .getResults().stream().map(Embedding::getOutput).toList();
+}
+```
+
+All three paths (`call()`, `embed(List<String>)`, `embed(Document)`) ultimately converge at `call(EmbeddingRequest)` — the single method containing all the tokenize → ONNX → pool logic.
+
+### 7.6 AiConfig — Wiring It All Together
+
+`AiConfig.java` is the Spring `@Configuration` class that creates the two AI-related beans and connects them:
+
+```java
+@Configuration
+public class AiConfig {
+
+    // @Primary tells Spring: when multiple EmbeddingModel beans exist,
+    // use THIS one as the default (prevents ambiguity with any auto-configured bean)
+    @Bean
+    @Primary
+    public EmbeddingModel embeddingModel() throws Exception {
+        OnnxEmbeddingModel model = new OnnxEmbeddingModel();
+        // InitializingBean.afterPropertiesSet() is called manually here because
+        // OnnxEmbeddingModel is not itself a @Component — AiConfig owns its lifecycle
+        model.afterPropertiesSet();
+        return model;
+    }
+
+    @Bean
+    public SimpleVectorStore vectorStore(EmbeddingModel embeddingModel) {
+        // Spring injects the EmbeddingModel bean created above
+        return SimpleVectorStore.builder(embeddingModel).build();
+    }
+}
+```
+
+**Why is `OnnxEmbeddingModel` not a `@Component`?**
+
+Because it needs to run `afterPropertiesSet()` (which loads 86 MB from disk) before it can be used, and we want that to happen in a controlled, explicit place. By constructing it directly in `AiConfig.embeddingModel()` and calling `afterPropertiesSet()` ourselves, the loading happens exactly once during application startup under clear control.
+
+### 7.7 SimpleVectorStore — How Vectors Are Stored
 
 ```java
 // AiConfig.java
@@ -770,16 +855,16 @@ public class SimpleVectorStore {
 
 **Important:** This is **in-memory** — all vectors are lost when the app restarts. For production, replace `SimpleVectorStore` with a persistent vector database:
 
-| Vector Database | Spring AI Config |
-|---|---|
-| Pinecone | `spring-ai-pinecone-store` |
+| Vector Database       | Spring AI Config           |
+| --------------------- | -------------------------- |
+| Pinecone              | `spring-ai-pinecone-store` |
 | pgvector (PostgreSQL) | `spring-ai-pgvector-store` |
-| Weaviate | `spring-ai-weaviate-store` |
-| Milvus | `spring-ai-milvus-store` |
+| Weaviate              | `spring-ai-weaviate-store` |
+| Milvus                | `spring-ai-milvus-store`   |
 
 All implement the same `VectorStore` interface — you'd only change the bean in `AiConfig.java`.
 
-### 7.7 Metadata Tagging — The documentId Filter
+### 7.8 Metadata Tagging — The documentId Filter
 
 ```java
 // DocumentService.java — Step 3
@@ -839,6 +924,7 @@ The question goes through exactly the same pipeline as the document chunks:
 ### 8.2 Cosine Similarity Search
 
 Now we have:
+
 - `questionVector` = the 384-dim embedding of the user's question
 - `chunkVectors` = all stored embeddings for this document
 
@@ -847,10 +933,12 @@ Now we have:
 $$\text{cosine\_similarity}(A, B) = \frac{A \cdot B}{|A| \times |B|}$$
 
 Where:
+
 - $A \cdot B = \sum_i A_i B_i$ — the dot product
 - $|A| = \sqrt{\sum_i A_i^2}$ — the magnitude (length) of vector A
 
 Result is in $[-1, 1]$:
+
 - $1.0$ = identical meaning
 - $0.0$ = completely unrelated
 - $-1.0$ = opposite meaning
@@ -912,7 +1000,9 @@ All invoices must be sent electronically to the billing department email..."
 
 ```java
 // QueryService.java
-ChatClient chatClient = ChatClient.builder(chatModel).build();
+// Note: chatClient is stored as a field on QueryService, created once in the constructor:
+//   this.chatClient = ChatClient.builder(chatModel).build();
+// It is stateless and safe to share across all requests.
 
 String answer = chatClient.prompt()
     .system(s -> s.text(SYSTEM_PROMPT).param("context", context))
@@ -934,9 +1024,11 @@ The `ChatClient` translates the above into an HTTPS request to `https://generati
     }
   ],
   "systemInstruction": {
-    "parts": [{
-      "text": "You are a helpful assistant...\n\nContext:\n[4 retrieved chunks]"
-    }]
+    "parts": [
+      {
+        "text": "You are a helpful assistant...\n\nContext:\n[4 retrieved chunks]"
+      }
+    ]
   },
   "generationConfig": {
     "temperature": 0.7
@@ -948,13 +1040,17 @@ The `ChatClient` translates the above into an HTTPS request to `https://generati
 
 ```json
 {
-  "candidates": [{
-    "content": {
-      "parts": [{
-        "text": "Based on the document, the payment terms are Net-30, meaning payment is due within 30 days of the invoice date. Late payments incur a 2% monthly interest charge starting on day 31. All invoices must be sent electronically to the billing department."
-      }]
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "Based on the document, the payment terms are Net-30, meaning payment is due within 30 days of the invoice date. Late payments incur a 2% monthly interest charge starting on day 31. All invoices must be sent electronically to the billing department."
+          }
+        ]
+      }
     }
-  }]
+  ]
 }
 ```
 
@@ -977,6 +1073,8 @@ Spring AI's `ChatClient.call().content()` extracts the text string from this res
 ```
 
 The `relevantChunks` field shows you exactly which parts of the document Gemini read before generating the answer.
+
+> **Implementation note:** Each chunk in `relevantChunks` is truncated to its first 200 characters with `"..."` appended. This is intentional — it shows enough context to verify the source without bloating the HTTP response. The full chunk text is what Gemini receives inside the system prompt.
 
 ---
 
@@ -1016,6 +1114,8 @@ SearchRequest.builder()
 // No filterExpression → searches across all documents
 ```
 
+The response `documentId` field is set to `"ALL_DOCUMENTS"` to indicate this was a global search (no single document was queried).
+
 **Example with 3 uploaded documents:**
 
 ```
@@ -1035,15 +1135,31 @@ The answer comes from whichever document(s) contained the most relevant text.
 
 ---
 
-## 10. All Exposed API Endpoints
+## 10. Common RAG Failure Modes
 
-| Method | Path | Auth | Request | Response |
-|--------|------|------|---------|----------|
-| `POST` | `/auth/login` | None | `{"username":"admin","password":"admin123"}` | `{"token":"eyJ...","username":"admin"}` |
-| `POST` | `/documents/upload` | JWT | `multipart/form-data` with `file` field | `{"documentId":"...","filename":"...","totalChunks":15,"message":"..."}` |
-| `GET` | `/documents` | JWT | none | `[{"documentId":"...","filename":"...","chunks":15}]` |
-| `POST` | `/documents/{id}/query` | JWT | `{"question":"..."}` | `{"answer":"...","question":"...","documentId":"...","relevantChunks":[...]}` |
-| `POST` | `/query` | JWT | `{"question":"..."}` | Same as above (no documentId, searches all docs) |
+Understanding what can go wrong helps you tune the system and debug unexpected answers.
+
+| Failure | Symptom | Root Cause | Fix |
+|---------|---------|-----------|-----|
+| **Poor retrieval** | Gemini says "I don't have enough information" even though the answer is in the document | The question's embedding is not similar to the chunk's embedding — maybe the question uses different vocabulary | Try rephrasing the question, or increase `top-k` |
+| **Hallucination slipping through** | Gemini answers a question that isn't in the document | The system prompt says "use ONLY the context" but the model still has its own knowledge | Rephrase the system prompt to be more restrictive; temperature closer to 0.0 |
+| **Data lost after restart** | All uploaded documents need to be re-uploaded | `SimpleVectorStore` is in-memory — no persistence | Replace with a persistent vector DB (pgvector, Weaviate, etc.) |
+| **Chunk boundary cuts a sentence** | Retrieval finds a chunk that ends mid-sentence, losing key information | `chunkSize` too small, or `chunkOverlap` too small | Increase `app.rag.chunk-overlap` in application.properties |
+| **Too much noise in context** | Gemini gives a vague, unfocused answer | `top-k` too high — irrelevant chunks dilute the relevant ones | Decrease `app.rag.top-k` (try 3 instead of 4) |
+| **Gemini 429 error** | 500 response on `/query` endpoint | API quota exceeded on the free tier | Wait and retry; or upgrade your Gemini API plan |
+| **ORT_INVALID_PROTOBUF on startup** | App crashes before starting | `model.onnx` file is a git-lfs pointer stub (133 bytes) instead of the real 86MB model | Ensure `ResourceCacheService` has a valid cached model at `${java.io.tmpdir}/spring-ai-onnx-generative/` |
+
+---
+
+## 11. All Exposed API Endpoints
+
+| Method | Path                    | Auth | Request                                      | Response                                                                      |
+| ------ | ----------------------- | ---- | -------------------------------------------- | ----------------------------------------------------------------------------- |
+| `POST` | `/auth/login`           | None | `{"username":"admin","password":"admin123"}` | `{"token":"eyJ...","username":"admin"}`                                       |
+| `POST` | `/documents/upload`     | JWT  | `multipart/form-data` with `file` field      | `{"documentId":"...","filename":"...","totalChunks":15,"message":"..."}`      |
+| `GET`  | `/documents`            | JWT  | none                                         | `[{"documentId":"...","filename":"...","chunks":15}]`                         |
+| `POST` | `/documents/{id}/query` | JWT  | `{"question":"..."}`                         | `{"answer":"...","question":"...","documentId":"...","relevantChunks":[...]}` |
+| `POST` | `/query`                | JWT  | `{"question":"..."}`                         | Same as above (no documentId, searches all docs)                              |
 
 **Server runs on port `8082`** (configured by `server.port=8082`).
 
@@ -1098,7 +1214,7 @@ curl -X POST http://localhost:8082/query \
 
 ---
 
-## 11. Configuration — application.properties Explained
+## 12. Configuration — application.properties Explained
 
 ```properties
 # ── Server ──────────────────────────────────────────────────
@@ -1154,7 +1270,7 @@ app.rag.top-k=4
 
 ---
 
-## 12. How Every Class Fits Together (Dependency Map)
+## 13. How Every Class Fits Together (Dependency Map)
 
 ```
 Spring Boot App starts up
@@ -1194,7 +1310,7 @@ Spring Boot App starts up
          │
          ├── QueryService.java (@Service)
          │     └── needs: SimpleVectorStore, ChatModel (Gemini), DocumentService
-         │     └── creates ChatClient per request (wraps ChatModel)
+         │     └── owns: ChatClient field (built once from ChatModel in constructor)
          │
          ├── QueryController.java (@RestController, path: /documents/{id}/query)
          │     └── needs: QueryService
@@ -1208,7 +1324,7 @@ Spring Boot App starts up
 
 ---
 
-## 13. End-to-End Request Traces
+## 14. End-to-End Request Traces
 
 ### Trace 1: Login
 
@@ -1372,6 +1488,7 @@ Your PDF/DOCX/TXT                   Your Question
 ```
 
 **The two cost dimensions:**
+
 - **Embedding**: 100% free, runs locally on your CPU (no API call, no tokens, no quota)
 - **Generation**: Calls Gemini API — uses your API quota. The free tier is generous for development.
 
