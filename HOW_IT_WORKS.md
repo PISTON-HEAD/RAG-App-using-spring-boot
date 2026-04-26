@@ -64,11 +64,11 @@ The LLM is not guessing. It reads your document's relevant parts and summarizes 
 
 **The three pillars of RAG:**
 
-| Pillar | What it does | Technology in this app |
-|---|---|---|
-| **Retrieval** | Find the most relevant text passages from your documents | ONNX all-MiniLM-L6-v2 (local) + SimpleVectorStore |
-| **Augmentation** | Combine the retrieved passages with the user's question into a structured prompt | `QueryService.buildResponse()` |
-| **Generation** | Read the prompt (question + retrieved context) and produce a fluent, grounded answer | Google Gemini 2.0 Flash (cloud) |
+| Pillar           | What it does                                                                         | Technology in this app                            |
+| ---------------- | ------------------------------------------------------------------------------------ | ------------------------------------------------- |
+| **Retrieval**    | Find the most relevant text passages from your documents                             | ONNX all-MiniLM-L6-v2 (local) + SimpleVectorStore |
+| **Augmentation** | Combine the retrieved passages with the user's question into a structured prompt     | `QueryService.buildResponse()`                    |
+| **Generation**   | Read the prompt (question + retrieved context) and produce a fluent, grounded answer | Google Gemini 2.0 Flash (cloud)                   |
 
 ### Why Semantic Search (not keyword search)?
 
@@ -1139,15 +1139,15 @@ The answer comes from whichever document(s) contained the most relevant text.
 
 Understanding what can go wrong helps you tune the system and debug unexpected answers.
 
-| Failure | Symptom | Root Cause | Fix |
-|---------|---------|-----------|-----|
-| **Poor retrieval** | Gemini says "I don't have enough information" even though the answer is in the document | The question's embedding is not similar to the chunk's embedding — maybe the question uses different vocabulary | Try rephrasing the question, or increase `top-k` |
-| **Hallucination slipping through** | Gemini answers a question that isn't in the document | The system prompt says "use ONLY the context" but the model still has its own knowledge | Rephrase the system prompt to be more restrictive; temperature closer to 0.0 |
-| **Data lost after restart** | All uploaded documents need to be re-uploaded | `SimpleVectorStore` is in-memory — no persistence | Replace with a persistent vector DB (pgvector, Weaviate, etc.) |
-| **Chunk boundary cuts a sentence** | Retrieval finds a chunk that ends mid-sentence, losing key information | `chunkSize` too small, or `chunkOverlap` too small | Increase `app.rag.chunk-overlap` in application.properties |
-| **Too much noise in context** | Gemini gives a vague, unfocused answer | `top-k` too high — irrelevant chunks dilute the relevant ones | Decrease `app.rag.top-k` (try 3 instead of 4) |
-| **Gemini 429 error** | 500 response on `/query` endpoint | API quota exceeded on the free tier | Wait and retry; or upgrade your Gemini API plan |
-| **ORT_INVALID_PROTOBUF on startup** | App crashes before starting | `model.onnx` file is a git-lfs pointer stub (133 bytes) instead of the real 86MB model | Ensure `ResourceCacheService` has a valid cached model at `${java.io.tmpdir}/spring-ai-onnx-generative/` |
+| Failure                             | Symptom                                                                                 | Root Cause                                                                                                      | Fix                                                                                                      |
+| ----------------------------------- | --------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| **Poor retrieval**                  | Gemini says "I don't have enough information" even though the answer is in the document | The question's embedding is not similar to the chunk's embedding — maybe the question uses different vocabulary | Try rephrasing the question, or increase `top-k`                                                         |
+| **Hallucination slipping through**  | Gemini answers a question that isn't in the document                                    | The system prompt says "use ONLY the context" but the model still has its own knowledge                         | Rephrase the system prompt to be more restrictive; temperature closer to 0.0                             |
+| **Data lost after restart**         | All uploaded documents need to be re-uploaded                                           | `SimpleVectorStore` is in-memory — no persistence                                                               | Replace with a persistent vector DB (pgvector, Weaviate, etc.)                                           |
+| **Chunk boundary cuts a sentence**  | Retrieval finds a chunk that ends mid-sentence, losing key information                  | `chunkSize` too small, or `chunkOverlap` too small                                                              | Increase `app.rag.chunk-overlap` in application.properties                                               |
+| **Too much noise in context**       | Gemini gives a vague, unfocused answer                                                  | `top-k` too high — irrelevant chunks dilute the relevant ones                                                   | Decrease `app.rag.top-k` (try 3 instead of 4)                                                            |
+| **Gemini 429 error**                | 500 response on `/query` endpoint                                                       | API quota exceeded on the free tier                                                                             | Wait and retry; or upgrade your Gemini API plan                                                          |
+| **ORT_INVALID_PROTOBUF on startup** | App crashes before starting                                                             | `model.onnx` file is a git-lfs pointer stub (133 bytes) instead of the real 86MB model                          | Ensure `ResourceCacheService` has a valid cached model at `${java.io.tmpdir}/spring-ai-onnx-generative/` |
 
 ---
 
