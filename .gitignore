@@ -36,3 +36,7 @@ Thumbs.db
 # Spring Boot
 application-local.properties
 application-secret.properties
+
+# Postman collections (keep locally, not in version control)
+*.postman_collection.json
+*.postman_environment.json
