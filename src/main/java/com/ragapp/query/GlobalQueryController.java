@@ -1,13 +1,15 @@
 package com.ragapp.query;
 
-import com.ragapp.dto.QueryRequest;
-import com.ragapp.dto.QueryResponse;
-import jakarta.validation.Valid;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
+
+import com.ragapp.dto.QueryRequest;
+import com.ragapp.dto.QueryResponse;
+
+import jakarta.validation.Valid;
 
 /**
  * Handles cross-document queries — searches across ALL uploaded documents.
@@ -18,7 +20,7 @@ import org.springframework.web.bind.annotation.RestController;
  * POST /query  { "question": "What are the payment terms?" }
  */
 @RestController
-@RequestMapping("/query")
+@RequestMapping("/api/query")
 public class GlobalQueryController {
 
     private final QueryService queryService;
