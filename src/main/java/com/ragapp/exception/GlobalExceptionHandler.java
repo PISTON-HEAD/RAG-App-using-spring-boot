@@ -57,6 +57,33 @@ public class GlobalExceptionHandler {
         ));
     }
 
+    @ExceptionHandler(HttpMediaTypeNotSupportedException.class)
+    public ResponseEntity<Map<String, Object>> handleUnsupportedMediaType(HttpMediaTypeNotSupportedException ex) {
+        return ResponseEntity.status(HttpStatus.UNSUPPORTED_MEDIA_TYPE).body(Map.of(
+                "error", "Wrong Content-Type. Use Body → form-data in Postman, set key='file' type=File.",
+                "received", ex.getContentType() != null ? ex.getContentType().toString() : "none",
+                "required", "multipart/form-data",
+                "timestamp", LocalDateTime.now().toString()
+        ));
+    }
+
+    @ExceptionHandler(MultipartException.class)
+    public ResponseEntity<Map<String, Object>> handleMultipart(MultipartException ex) {
+        return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(Map.of(
+                "error", "Multipart request error. Ensure you are sending a file via form-data with key 'file'.",
+                "detail", ex.getMessage() != null ? ex.getMessage() : "(no detail)",
+                "timestamp", LocalDateTime.now().toString()
+        ));
+    }
+
+    @ExceptionHandler(MissingServletRequestParameterException.class)
+    public ResponseEntity<Map<String, Object>> handleMissingParam(MissingServletRequestParameterException ex) {
+        return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(Map.of(
+                "error", "Missing required parameter: '" + ex.getParameterName() + "'. In Postman, set form-data key='" + ex.getParameterName() + "' type=File.",
+                "timestamp", LocalDateTime.now().toString()
+        ));
+    }
+
     @ExceptionHandler(ClientException.class)
     public ResponseEntity<Map<String, Object>> handleGeminiClientError(ClientException ex) {
         HttpStatus status = ex.code() == 429 ? HttpStatus.TOO_MANY_REQUESTS : HttpStatus.BAD_GATEWAY;
