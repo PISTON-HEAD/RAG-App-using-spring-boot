@@ -3,6 +3,8 @@ package com.ragapp.exception;
 import java.time.LocalDateTime;
 import java.util.Map;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.authentication.BadCredentialsException;
@@ -15,6 +17,8 @@ import com.google.genai.errors.ClientException;
 
 @RestControllerAdvice
 public class GlobalExceptionHandler {
+
+    private static final Logger log = LoggerFactory.getLogger(GlobalExceptionHandler.class);
 
     @ExceptionHandler(BadCredentialsException.class)
     public ResponseEntity<Map<String, Object>> handleBadCredentials(BadCredentialsException ex) {
@@ -79,8 +83,12 @@ public class GlobalExceptionHandler {
             }
             cause = cause.getCause();
         }
+        // Log the full stack trace so it appears in the console
+        log.error("Unhandled exception [{}]: {}", ex.getClass().getName(), ex.getMessage(), ex);
         return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(Map.of(
                 "error", "An unexpected error occurred. Please try again later.",
+                "exceptionType", ex.getClass().getName(),
+                "exceptionMessage", ex.getMessage() != null ? ex.getMessage() : "(no message)",
                 "timestamp", LocalDateTime.now().toString()
         ));
     }
