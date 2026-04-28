@@ -1,6 +1,5 @@
 package com.ragapp.exception;
 
-import com.google.genai.errors.ClientException;
 import java.time.LocalDateTime;
 import java.util.Map;
 
@@ -11,6 +10,8 @@ import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.multipart.MaxUploadSizeExceededException;
+
+import com.google.genai.errors.ClientException;
 
 @RestControllerAdvice
 public class GlobalExceptionHandler {
@@ -69,6 +70,15 @@ public class GlobalExceptionHandler {
 
     @ExceptionHandler(Exception.class)
     public ResponseEntity<Map<String, Object>> handleGeneral(Exception ex) {
+        // Spring AI wraps ClientException inside RuntimeException("Failed to generate content").
+        // Walk the cause chain to detect it and return a proper 429 instead of a generic 500.
+        Throwable cause = ex.getCause();
+        while (cause != null) {
+            if (cause instanceof ClientException clientEx) {
+                return handleGeminiClientError(clientEx);
+            }
+            cause = cause.getCause();
+        }
         return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(Map.of(
                 "error", "An unexpected error occurred. Please try again later.",
                 "timestamp", LocalDateTime.now().toString()
