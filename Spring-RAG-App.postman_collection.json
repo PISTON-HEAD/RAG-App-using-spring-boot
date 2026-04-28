@@ -1,0 +1,424 @@
+{
+  "info": {
+    "_postman_id": "spring-rag-app-collection",
+    "name": "Spring RAG App",
+    "description": "Complete API collection for the Spring Boot RAG application.\n\nBase URL: http://localhost:8082\n\nAuthentication: JWT Bearer Token\n- Login first to get the token\n- Set the {{token}} collection variable automatically via the login request\n- All protected endpoints use {{token}} automatically\n\nUsers:\n- admin / admin123  (ROLE_ADMIN)\n- user  / user123   (ROLE_USER)",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:8082",
+      "type": "string"
+    },
+    {
+      "key": "token",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "documentId",
+      "value": "",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "Auth",
+      "description": "Authentication endpoints. Login to receive a JWT token.",
+      "item": [
+        {
+          "name": "Login (admin)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var json = pm.response.json();",
+                  "if (json.token) {",
+                  "    pm.collectionVariables.set('token', json.token);",
+                  "    console.log('Token saved to collection variable');",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"admin\",\n  \"password\": \"admin123\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/auth/login",
+              "host": ["{{baseUrl}}"],
+              "path": ["auth", "login"]
+            },
+            "description": "Login as admin (ROLE_ADMIN). The test script automatically saves the JWT token to the {{token}} collection variable."
+          },
+          "response": []
+        },
+        {
+          "name": "Login (user)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var json = pm.response.json();",
+                  "if (json.token) {",
+                  "    pm.collectionVariables.set('token', json.token);",
+                  "    console.log('Token saved to collection variable');",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"user\",\n  \"password\": \"user123\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/auth/login",
+              "host": ["{{baseUrl}}"],
+              "path": ["auth", "login"]
+            },
+            "description": "Login as regular user (ROLE_USER). Note: user role cannot access /actuator/** endpoints (admin only)."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Documents",
+      "description": "Document management endpoints. Upload documents for RAG ingestion and list uploaded documents.",
+      "item": [
+        {
+          "name": "Upload Document",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var json = pm.response.json();",
+                  "if (json.documentId) {",
+                  "    pm.collectionVariables.set('documentId', json.documentId);",
+                  "    console.log('documentId saved: ' + json.documentId);",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [{ "key": "token", "value": "{{token}}", "type": "string" }]
+            },
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": [],
+                  "description": "Select a .txt, .pdf, .docx, or other Tika-supported file"
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/documents/upload",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "documents", "upload"]
+            },
+            "description": "Upload a document for RAG ingestion.\n\nThe document is:\n1. Parsed by Apache Tika (supports PDF, DOCX, TXT, HTML, etc.)\n2. Split into ~800-token chunks with 100-token overlap\n3. Embedded via ONNX all-MiniLM-L6-v2 (384-dim vectors)\n4. Stored in the in-memory SimpleVectorStore\n\nThe test script saves the returned documentId to {{documentId}}."
+          },
+          "response": []
+        },
+        {
+          "name": "List Documents",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [{ "key": "token", "value": "{{token}}", "type": "string" }]
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/documents",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "documents"]
+            },
+            "description": "List all uploaded documents with their metadata (documentId, filename, chunk count, upload timestamp)."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Query",
+      "description": "RAG query endpoints.\n\n- Per-document query: searches only within a specific document's chunks\n- Global query: searches across all uploaded documents",
+      "item": [
+        {
+          "name": "Query — Per Document",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [{ "key": "token", "value": "{{token}}", "type": "string" }]
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"question\": \"What is this document about?\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/documents/{{documentId}}/query",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "documents", "{{documentId}}", "query"]
+            },
+            "description": "Ask a question scoped to a single document.\n\nRAG pipeline:\n1. Embed the question (ONNX all-MiniLM-L6-v2)\n2. Similarity search filtered by documentId metadata\n3. Retrieve top-4 most relevant chunks\n4. Build system prompt with chunks as context\n5. Send to Gemini 2.5 Flash\n6. Return answer + relevant chunk excerpts\n\nReplace {{documentId}} or set it via the Upload Document request."
+          },
+          "response": []
+        },
+        {
+          "name": "Query — Global (All Documents)",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [{ "key": "token", "value": "{{token}}", "type": "string" }]
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"question\": \"Summarise everything you know from the uploaded documents.\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/query",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "query"]
+            },
+            "description": "Ask a question across all uploaded documents (no documentId filter).\n\nThe response documentId will be \"ALL_DOCUMENTS\".\n\nRAG pipeline:\n1. Embed the question\n2. Cosine similarity search across ALL chunks from ALL documents\n3. Retrieve top-4 globally most relevant chunks (may span multiple documents)\n4. Build prompt and call Gemini 2.5 Flash\n5. Return answer + top chunk excerpts (first 200 chars each)"
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Actuator",
+      "description": "Spring Boot Actuator endpoints for monitoring and operations.\n\nAccess rules:\n- /actuator/health  — PUBLIC (no token needed)\n- /actuator/info    — PUBLIC (no token needed)\n- /actuator/**      — ADMIN only (login as admin first)\n\nExposed endpoints: health, info, metrics, env, beans, mappings, loggers",
+      "item": [
+        {
+          "name": "Health (public)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/actuator/health",
+              "host": ["{{baseUrl}}"],
+              "path": ["actuator", "health"]
+            },
+            "description": "Application health check. Public — no token required.\n\nReturns status UP/DOWN and component-level health (diskSpace, ping).\n\nFull health details (component breakdown) are only shown when authenticated."
+          },
+          "response": []
+        },
+        {
+          "name": "Info (public)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/actuator/info",
+              "host": ["{{baseUrl}}"],
+              "path": ["actuator", "info"]
+            },
+            "description": "Application info. Public — no token required.\n\nReturns app name, description, and version from application.properties (info.app.*)."
+          },
+          "response": []
+        },
+        {
+          "name": "Metrics — Index",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [{ "key": "token", "value": "{{token}}", "type": "string" }]
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/actuator/metrics",
+              "host": ["{{baseUrl}}"],
+              "path": ["actuator", "metrics"]
+            },
+            "description": "Lists all available metric names. Requires ADMIN token.\n\nUse the metric name in GET /actuator/metrics/{metricName} to get specific values."
+          },
+          "response": []
+        },
+        {
+          "name": "Metrics — JVM Memory Used",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [{ "key": "token", "value": "{{token}}", "type": "string" }]
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/actuator/metrics/jvm.memory.used",
+              "host": ["{{baseUrl}}"],
+              "path": ["actuator", "metrics", "jvm.memory.used"]
+            },
+            "description": "Current JVM memory usage in bytes. Requires ADMIN token."
+          },
+          "response": []
+        },
+        {
+          "name": "Metrics — HTTP Server Requests",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [{ "key": "token", "value": "{{token}}", "type": "string" }]
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/actuator/metrics/http.server.requests",
+              "host": ["{{baseUrl}}"],
+              "path": ["actuator", "metrics", "http.server.requests"]
+            },
+            "description": "HTTP request count and timing statistics. Requires ADMIN token."
+          },
+          "response": []
+        },
+        {
+          "name": "Environment",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [{ "key": "token", "value": "{{token}}", "type": "string" }]
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/actuator/env",
+              "host": ["{{baseUrl}}"],
+              "path": ["actuator", "env"]
+            },
+            "description": "Full application environment — property sources, active profiles, system properties. Requires ADMIN token.\n\nSensitive values (passwords, secrets) are automatically masked as ******."
+          },
+          "response": []
+        },
+        {
+          "name": "Beans",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [{ "key": "token", "value": "{{token}}", "type": "string" }]
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/actuator/beans",
+              "host": ["{{baseUrl}}"],
+              "path": ["actuator", "beans"]
+            },
+            "description": "Lists all Spring beans registered in the application context. Requires ADMIN token.\n\nUseful for verifying that embeddingModel, vectorStore, chatModel beans are loaded correctly."
+          },
+          "response": []
+        },
+        {
+          "name": "Mappings",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [{ "key": "token", "value": "{{token}}", "type": "string" }]
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/actuator/mappings",
+              "host": ["{{baseUrl}}"],
+              "path": ["actuator", "mappings"]
+            },
+            "description": "Lists all @RequestMapping routes registered in the application. Requires ADMIN token.\n\nShows every endpoint: method, path, handler class."
+          },
+          "response": []
+        },
+        {
+          "name": "Loggers",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [{ "key": "token", "value": "{{token}}", "type": "string" }]
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/actuator/loggers",
+              "host": ["{{baseUrl}}"],
+              "path": ["actuator", "loggers"]
+            },
+            "description": "Lists all loggers and their current log levels. Requires ADMIN token.\n\nYou can also POST to /actuator/loggers/{name} to change a log level at runtime without restarting."
+          },
+          "response": []
+        },
+        {
+          "name": "Loggers — Change Log Level",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [{ "key": "token", "value": "{{token}}", "type": "string" }]
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"configuredLevel\": \"DEBUG\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/actuator/loggers/com.ragapp",
+              "host": ["{{baseUrl}}"],
+              "path": ["actuator", "loggers", "com.ragapp"]
+            },
+            "description": "Dynamically change the log level for com.ragapp (or any logger) at runtime. Requires ADMIN token.\n\nValid levels: TRACE, DEBUG, INFO, WARN, ERROR, FATAL, OFF\n\nChange back to INFO with {\"configuredLevel\": \"INFO\"}"
+          },
+          "response": []
+        }
+      ]
+    }
+  ]
+}
