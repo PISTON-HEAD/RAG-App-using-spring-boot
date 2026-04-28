@@ -1,5 +1,6 @@
 package com.ragapp.exception;
 
+import com.google.genai.errors.ClientException;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.ai.chat.model.ChatModel;
@@ -8,9 +9,12 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.mock.mockito.MockBean;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
 import org.springframework.test.context.TestPropertySource;
 import org.springframework.test.web.servlet.MockMvc;
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
 
@@ -21,7 +25,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 @SpringBootTest
 @AutoConfigureMockMvc
 @TestPropertySource(properties = {
-        "spring.ai.openai.api-key=test-key-does-not-call-openai"
+        "spring.ai.google.genai.api-key=test-key-does-not-call-gemini"
 })
 class GlobalExceptionHandlerTest {
 
@@ -53,5 +57,20 @@ class GlobalExceptionHandlerTest {
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.error").isNotEmpty())
                 .andExpect(jsonPath("$.timestamp").isNotEmpty());
+    }
+
+    @Test
+    @DisplayName("Gemini 429 error â†’ 429 with provider details")
+    void geminiQuotaError_returns429WithProviderDetails() {
+        GlobalExceptionHandler handler = new GlobalExceptionHandler();
+
+        ResponseEntity<java.util.Map<String, Object>> response = handler.handleGeminiClientError(
+                new ClientException(429, "RESOURCE_EXHAUSTED", "quota exceeded")
+        );
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.TOO_MANY_REQUESTS);
+        assertThat(response.getBody()).containsEntry("providerCode", 429);
+        assertThat(response.getBody()).containsEntry("providerStatus", "RESOURCE_EXHAUSTED");
+        assertThat(response.getBody().get("error").toString()).contains("Gemini quota/rate limit reached");
     }
 }

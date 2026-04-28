@@ -1,5 +1,6 @@
 package com.ragapp.exception;
 
+import com.google.genai.errors.ClientException;
 import java.time.LocalDateTime;
 import java.util.Map;
 
@@ -47,6 +48,21 @@ public class GlobalExceptionHandler {
     public ResponseEntity<Map<String, Object>> handleMaxSize(MaxUploadSizeExceededException ex) {
         return ResponseEntity.status(HttpStatus.PAYLOAD_TOO_LARGE).body(Map.of(
                 "error", "File size exceeds the maximum allowed size (10MB)",
+                "timestamp", LocalDateTime.now().toString()
+        ));
+    }
+
+    @ExceptionHandler(ClientException.class)
+    public ResponseEntity<Map<String, Object>> handleGeminiClientError(ClientException ex) {
+        HttpStatus status = ex.code() == 429 ? HttpStatus.TOO_MANY_REQUESTS : HttpStatus.BAD_GATEWAY;
+        String message = ex.code() == 429
+                ? "Gemini quota/rate limit reached for the configured Google AI project. Verify the API key, project billing, and AI Studio quota tier."
+                : "Gemini rejected the request: " + ex.message();
+
+        return ResponseEntity.status(status).body(Map.of(
+                "error", message,
+                "providerStatus", ex.status(),
+                "providerCode", ex.code(),
                 "timestamp", LocalDateTime.now().toString()
         ));
     }
