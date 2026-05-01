@@ -1,6 +1,7 @@
 # Spring RAG App — Complete Technical Deep Dive
 
 > Personal interview reference. Everything you need to explain this project confidently.
+> This document covers both the original RAG app AND every change made when implementing conversational memory.
 
 ---
 
@@ -15,19 +16,26 @@
 7. [RAG Query Pipeline](#7-rag-query-pipeline)
 8. [JWT Authentication — How It Works](#8-jwt-authentication--how-it-works)
 9. [Conversational Memory — The New Feature](#9-conversational-memory--the-new-feature)
-10. [ConcurrentHashMap vs HashMap](#10-concurrenthashmap-vs-hashmap)
-11. [Why Deque? How It Stores Q&A](#11-why-deque-how-it-stores-qa)
-12. [Why synchronized on the Deque?](#12-why-synchronized-on-the-deque)
-13. [Session ID — Generation, Lifecycle, Expiry](#13-session-id--generation-lifecycle-expiry)
-14. [Why 5 Turns? Why Not Unlimited?](#14-why-5-turns-why-not-unlimited)
-15. [What Happens When a Session Expires?](#15-what-happens-when-a-session-expires)
-16. [Spring Security Filter Chain](#16-spring-security-filter-chain)
-17. [Exception Handling Strategy](#17-exception-handling-strategy)
-18. [Actuator — Monitoring & Observability](#18-actuator--monitoring--observability)
-19. [Configuration Properties Reference](#19-configuration-properties-reference)
-20. [Complete Request Flow — End to End](#20-complete-request-flow--end-to-end)
-21. [What Changed: Base RAG vs Conversational RAG](#21-what-changed-base-rag-vs-conversational-rag)
-22. [Interview Questions & Model Answers](#22-interview-questions--model-answers)
+10. [ChatHistoryService — Complete Code Walkthrough](#10-chathistoryservice--complete-code-walkthrough)
+11. [QueryService — How Conversational Memory Is Wired In](#11-queryservice--how-conversational-memory-is-wired-in)
+12. [Java Records — How ChatTurn Works Internally](#12-java-records--how-chatturn-works-internally)
+13. [ConcurrentHashMap vs HashMap — Deep Dive](#13-concurrenthashmap-vs-hashmap--deep-dive)
+14. [Why Deque? How It Stores Q&A](#14-why-deque-how-it-stores-qa)
+15. [Why synchronized on the Deque?](#15-why-synchronized-on-the-deque)
+16. [computeIfAbsent — Thread Safety Guarantee](#16-computeifabsent--thread-safety-guarantee)
+17. [Session ID — Generation, Lifecycle, Expiry](#17-session-id--generation-lifecycle-expiry)
+18. [How Gemini Receives the Full Conversation](#18-how-gemini-receives-the-full-conversation)
+19. [Why 5 Turns? Why Not Unlimited?](#19-why-5-turns-why-not-unlimited)
+20. [What Happens When a Session Expires?](#20-what-happens-when-a-session-expires)
+21. [Spring @Scheduled — How TTL Cleanup Works](#21-spring-scheduled--how-ttl-cleanup-works)
+22. [Spring Security Filter Chain](#22-spring-security-filter-chain)
+23. [Exception Handling Strategy](#23-exception-handling-strategy)
+24. [Actuator — Monitoring & Observability](#24-actuator--monitoring--observability)
+25. [Configuration Properties Reference](#25-configuration-properties-reference)
+26. [Complete Request Flow — End to End](#26-complete-request-flow--end-to-end)
+27. [What Changed: Base RAG vs Conversational RAG](#27-what-changed-base-rag-vs-conversational-rag)
+28. [In-Memory Data Structure — What Lives in RAM](#28-in-memory-data-structure--what-lives-in-ram)
+29. [Interview Questions & Model Answers](#29-interview-questions--model-answers)
 
 ---
 
@@ -35,15 +43,38 @@
 
 This is a **Spring Boot RAG (Retrieval Augmented Generation) application** with **conversational memory**.
 
-### What it does
+### What the original RAG app did (before conversational memory)
 
-Users upload documents (PDF, DOCX, TXT, etc.). They can then ask natural language questions. The system:
+The base version of this application was a stateless document Q&A system. Every single query was completely independent:
 
-1. Converts the question into a mathematical vector (embedding)
-2. Searches the uploaded document chunks for the most relevant pieces
-3. Feeds those pieces as context to Google Gemini (the LLM)
-4. Gemini generates a grounded answer — it can only use the provided context, not its training data
-5. The conversation history from the session is also sent so the LLM understands follow-up questions
+1. User logs in → gets a JWT token
+2. User uploads a document → it gets parsed, chunked, embedded, and stored in an in-memory vector store
+3. User asks a question → the question is embedded, the top-4 most similar document chunks are retrieved, fed to Gemini as context, and an answer is returned
+4. **Each question was completely isolated** — Gemini had zero knowledge of any previous questions in the conversation
+
+This was functional but had a major limitation: users couldn't have a **conversation**. If you asked "What are the payment terms?" and then followed up with "Can you elaborate on that?", Gemini would have no idea what "that" referred to.
+
+### What we added: Conversational Memory
+
+We added **server-side session management** — every conversation gets a UUID session ID, and the server stores the Q&A history for that session. On every new query, the server:
+
+1. Looks up the session's prior Q&A turns
+2. Injects them into the Gemini prompt as alternating User/Assistant messages
+3. Appends the new Q&A turn to the session after getting the answer
+
+Now Gemini sees the full context of the conversation — it can understand "that", "it", "what you said earlier", multi-turn clarification, etc.
+
+### What it does now (full feature set)
+
+Users upload documents (PDF, DOCX, TXT, etc.). They can then ask natural language questions in a **conversation**. The system:
+
+1. Converts the question into a mathematical vector (embedding) using a local ONNX model
+2. Searches the uploaded document chunks for the most relevant pieces using cosine similarity
+3. Fetches the conversation history for the user's session (up to 5 prior Q&A turns)
+4. Feeds the document chunks + conversation history + new question as a structured prompt to Google Gemini 2.5 Flash
+5. Gemini generates a grounded, context-aware answer
+6. The new Q&A turn is saved to the session for future requests
+7. The session auto-expires after 30 minutes of inactivity (cleaned up by a background scheduler)
 
 ### Why RAG instead of just asking the LLM?
 
@@ -491,7 +522,7 @@ Stored in-memory via `UserConfig.java` (no database). Passwords are BCrypt hashe
 
 ### The problem with stateless RAG
 
-Before this feature, every query was independent:
+Before this feature, every query was completely independent:
 
 ```
 Turn 1: "What is Spring Boot?"
@@ -499,107 +530,574 @@ Turn 1: "What is Spring Boot?"
 
 Turn 2: "Tell me more about its auto-configuration"
         → Gemini had NO idea what "its" referred to
-        → It would either hallucinate or ask for clarification
+        → It would either guess incorrectly or ask what you mean
 ```
+
+This happens because without history, the Gemini prompt for Turn 2 is simply:
+
+```
+System: "Answer using ONLY this context: [4 document chunks]"
+User:   "Tell me more about its auto-configuration"
+```
+
+Gemini has no reference for what "its" means.
 
 ### The solution: inject history into the Gemini prompt
 
-With conversational memory, the Gemini prompt becomes:
+With conversational memory, the Gemini prompt for Turn 2 becomes:
 
 ```
 [System]
 You are a helpful assistant... Context: {RAG chunks}
 
-[User]        ← Turn 1 question (from history)
+[User]        ← Turn 1 question (from stored history)
 What is Spring Boot?
 
-[Assistant]   ← Turn 1 answer (from history)
+[Assistant]   ← Turn 1 answer (from stored history)
 Spring Boot is a Java framework that simplifies...
 
-[User]        ← Turn 2 question (from history)
-Tell me more about its auto-configuration.
-
-[Assistant]   ← Turn 2 answer (from history)
-Spring Boot's auto-configuration works by...
-
 [User]        ← CURRENT question
-How does auto-configuration decide which beans to create?
+Tell me more about its auto-configuration
 ```
 
-Now Gemini fully understands "auto-configuration" from the context of the conversation.
+Now Gemini fully understands "its" — it refers to Spring Boot, established in Turn 1.
 
-### Key design decision: we store history server-side
+### How the three components work together
 
-The client only sends a `sessionId` (UUID). The server holds all the Q&A pairs. This is intentional:
+The feature involves three components:
 
-- The client doesn't need to re-send its entire chat history on every request
-- Reduces request payload size significantly (imaginge 20 turns of Q&A in every request body)
-- The server controls the window size (max 5 turns) — client can't bypass this
+```
+┌──────────────────────────────────────────────────────────────┐
+│                       HTTP Request                           │
+│  X-Session-Id: abc-123  (optional header)                    │
+└───────────────────┬──────────────────────────────────────────┘
+                    │
+                    ▼
+┌──────────────────────────────────────────────────────────────┐
+│  QueryController / GlobalQueryController                     │
+│  Reads X-Session-Id from @RequestHeader                      │
+│  Passes it to QueryService                                   │
+└───────────────────┬──────────────────────────────────────────┘
+                    │
+                    ▼
+┌──────────────────────────────────────────────────────────────┐
+│  QueryService.buildResponse()                                │
+│  1. resolveSessionId() → reuse or generate UUID             │
+│  2. Do vector search → get top-4 chunks                     │
+│  3. chatHistoryService.getHistory(sessionId) → List<ChatTurn>│
+│  4. Convert ChatTurns → List<Message> (User + Assistant)    │
+│  5. Send to Gemini: system + history + current question     │
+│  6. chatHistoryService.addTurn(sessionId, Q, A)             │
+│  7. Return QueryResponse (includes sessionId in body)        │
+└───────────────────┬──────────────────────────────────────────┘
+                    │
+                    ▼
+┌──────────────────────────────────────────────────────────────┐
+│  ChatHistoryService                                          │
+│  ConcurrentHashMap<sessionId → SessionData>                  │
+│  SessionData = { Deque<ChatTurn>, AtomicLong lastActiveMs }  │
+│  @Scheduled cleanup every 5 minutes                         │
+└──────────────────────────────────────────────────────────────┘
+```
+
+### Key design decision: server-side history storage
+
+We store history on the **server**, not the client. The client only sends a short UUID string as `X-Session-Id`. The server does all the heavy lifting.
+
+**Why server-side?**
+
+1. **Payload size** — if the client had to re-send 5 Q&A turns in every request body, the request would be huge. With server-side storage, the client sends 36 characters (a UUID) and gets back the full context.
+
+2. **Security** — the server controls the window size (max 5 turns) and TTL (30 minutes). The client cannot inject fake history or bypass limits.
+
+3. **Simplicity** — the client doesn't need to track or manage history at all. It just saves and re-sends the session ID.
+
+4. **Natural expiry** — the server automatically purges idle sessions. If the user abandons a conversation, the memory is reclaimed after 30 minutes.
+
+### The new HTTP header: X-Session-Id
+
+We chose a **custom request header** (`X-Session-Id`) rather than a cookie or a body field:
+
+- **Not a cookie**: cookies are browser-specific, automatically attached to requests, and have CSRF implications. Our API is meant for any client (mobile, Postman, other services) — headers are universal.
+- **Not in the request body**: the body schema is `{"question": "..."}`. We don't want to mix authentication/session concerns into the business payload.
+- **Custom header with `X-` prefix**: the `X-` prefix signals it's a custom, application-defined header, not an HTTP standard header. Clear and conventional.
+
+### The `required = false` annotation
+
+```java
+@RequestHeader(value = "X-Session-Id", required = false) String sessionId
+```
+
+`required = false` means the header is optional. If the client doesn't send it, Spring sets `sessionId` to `null`. The `resolveSessionId()` method in `QueryService` handles this:
+
+```java
+private String resolveSessionId(String sessionId) {
+    return (sessionId != null && !sessionId.isBlank()) ? sessionId : UUID.randomUUID().toString();
+}
+```
+
+- If `sessionId` is `null` (header absent) → generate a new UUID
+- If `sessionId` is blank (client sent empty string) → generate a new UUID
+- Otherwise → use the client's session ID
+
+This means **every request gets a session** — first-time callers just start with an empty history automatically.
 
 ---
 
-## 10. ConcurrentHashMap vs HashMap
+## 10. ChatHistoryService — Complete Code Walkthrough
+
+This is the most important new class. Let's go line by line.
+
+### The complete source code
+
+```java
+@Service
+public class ChatHistoryService {
+
+    @Value("${app.rag.chat-history.max-turns:5}")
+    private int maxTurns;
+
+    @Value("${app.rag.chat-history.ttl-minutes:30}")
+    private int ttlMinutes;
+
+    private record SessionData(Deque<ChatTurn> turns, AtomicLong lastActiveMs) {}
+
+    private final ConcurrentHashMap<String, SessionData> sessions = new ConcurrentHashMap<>();
+
+    public List<ChatTurn> getHistory(String sessionId) {
+        SessionData data = sessions.get(sessionId);
+        if (data == null) {
+            return List.of();
+        }
+        data.lastActiveMs().set(System.currentTimeMillis());
+        synchronized (data.turns()) {
+            return new ArrayList<>(data.turns());
+        }
+    }
+
+    public void addTurn(String sessionId, String question, String answer) {
+        SessionData data = sessions.computeIfAbsent(sessionId,
+                id -> new SessionData(new ArrayDeque<>(), new AtomicLong(System.currentTimeMillis())));
+        data.lastActiveMs().set(System.currentTimeMillis());
+        synchronized (data.turns()) {
+            if (data.turns().size() >= maxTurns) {
+                data.turns().pollFirst();
+            }
+            data.turns().addLast(new ChatTurn(question, answer, LocalDateTime.now()));
+        }
+    }
+
+    @Scheduled(fixedRate = 300_000)
+    public void evictExpiredSessions() {
+        long cutoffMs = System.currentTimeMillis() - (ttlMinutes * 60_000L);
+        sessions.entrySet().removeIf(e -> e.getValue().lastActiveMs().get() < cutoffMs);
+    }
+}
+```
+
+### Line-by-line explanation
+
+**`@Service`**
+Marks this as a Spring-managed bean. Spring creates exactly ONE instance (singleton) at startup and injects it into every class that needs it. Since there's one instance shared across all threads, thread safety is critical.
+
+**`@Value("${app.rag.chat-history.max-turns:5}")`**
+Reads the `app.rag.chat-history.max-turns` property from `application.properties`. The `:5` is a default value — if the property isn't defined, it uses 5. This makes the window size configurable without recompiling.
+
+**`private record SessionData(Deque<ChatTurn> turns, AtomicLong lastActiveMs) {}`**
+A private inner record. Records are Java 16+ immutable data carriers. This `SessionData` holds:
+
+- `turns`: the ordered history of Q&A pairs (the Deque)
+- `lastActiveMs`: the millisecond timestamp of last activity (for TTL)
+
+"Immutable" here means the `turns` and `lastActiveMs` references themselves are final — you can't point them at different objects. But the Deque and AtomicLong's **contents** can still change, which is why we need synchronization.
+
+**`private final ConcurrentHashMap<String, SessionData> sessions = new ConcurrentHashMap<>()`**
+The master map. `String` key = session UUID. `SessionData` value = the turns + last-active timestamp. `final` means the reference to the map never changes after construction (the map itself grows/shrinks as sessions are added/removed).
+
+**`getHistory(String sessionId)`**
+
+```java
+SessionData data = sessions.get(sessionId);
+if (data == null) {
+    return List.of();  // session doesn't exist yet → empty history
+}
+```
+
+`List.of()` returns an immutable empty list. Efficient — no allocation overhead.
+
+```java
+data.lastActiveMs().set(System.currentTimeMillis());
+```
+
+Update the "last seen" timestamp. This prevents the session from being expired by the cleanup job as long as the user is actively making queries.
+
+```java
+synchronized (data.turns()) {
+    return new ArrayList<>(data.turns());
+}
+```
+
+`synchronized (data.turns())` locks on the `ArrayDeque` object itself. Inside, we create a **snapshot** — a brand new `ArrayList` that is a copy of the current Deque contents. We return the copy, not the Deque itself. Why a copy? Because the Deque is live and mutable — if we returned a reference to the Deque directly, the caller could iterate it while another thread modifies it (causing `ConcurrentModificationException`). The copy is safe to read outside the lock.
+
+**`addTurn(String sessionId, String question, String answer)`**
+
+```java
+SessionData data = sessions.computeIfAbsent(sessionId,
+        id -> new SessionData(new ArrayDeque<>(), new AtomicLong(System.currentTimeMillis())));
+```
+
+`computeIfAbsent` is an atomic operation on `ConcurrentHashMap`. It checks if `sessionId` exists:
+
+- If YES → returns the existing `SessionData` (no change)
+- If NO → calls the lambda to create a new `SessionData(new ArrayDeque<>(), new AtomicLong(now))`, stores it, and returns it
+
+The atomicity guarantee means that even if two threads call `addTurn` simultaneously for the same **new** session ID, exactly one `SessionData` is created. There is no race condition where both threads create a `SessionData` and one silently overwrites the other.
+
+```java
+data.lastActiveMs().set(System.currentTimeMillis());
+```
+
+Update last-active again. `AtomicLong.set()` is a single atomic write — no synchronization needed.
+
+```java
+synchronized (data.turns()) {
+    if (data.turns().size() >= maxTurns) {
+        data.turns().pollFirst();   // evict oldest turn (from the HEAD)
+    }
+    data.turns().addLast(new ChatTurn(question, answer, LocalDateTime.now()));
+}
+```
+
+Inside the lock:
+
+1. Check if we've hit the limit (maxTurns = 5 by default)
+2. If yes, `pollFirst()` removes and discards the oldest turn from the front
+3. `addLast()` appends the new turn at the back
+
+After this, the Deque always has at most `maxTurns` entries.
+
+**`evictExpiredSessions()`**
+
+```java
+@Scheduled(fixedRate = 300_000)
+public void evictExpiredSessions() {
+    long cutoffMs = System.currentTimeMillis() - (ttlMinutes * 60_000L);
+    sessions.entrySet().removeIf(e -> e.getValue().lastActiveMs().get() < cutoffMs);
+}
+```
+
+Runs every 300,000 ms = 5 minutes. `cutoffMs` is the boundary: any session whose last active time is before this is stale. `removeIf` on `ConcurrentHashMap.entrySet()` is thread-safe — it atomically removes all matching entries.
+
+---
+
+## 11. QueryService — How Conversational Memory Is Wired In
+
+The `QueryService` was the biggest modified class. Here is the relevant section that handles conversational memory:
+
+### Constructor change
+
+```java
+// BEFORE (base RAG app):
+public QueryService(SimpleVectorStore vectorStore, ChatModel chatModel,
+                    DocumentService documentService) {
+    this.vectorStore = vectorStore;
+    this.chatClient = ChatClient.builder(chatModel).build();
+    this.documentService = documentService;
+}
+
+// AFTER (with conversational memory):
+public QueryService(SimpleVectorStore vectorStore, ChatModel chatModel,
+                    DocumentService documentService, ChatHistoryService chatHistoryService) {
+    this.vectorStore = vectorStore;
+    this.chatClient = ChatClient.builder(chatModel).build();
+    this.documentService = documentService;
+    this.chatHistoryService = chatHistoryService;  // ← NEW injection
+}
+```
+
+Spring auto-wires `ChatHistoryService` because it's a `@Service` bean.
+
+### Method signature change
+
+```java
+// BEFORE:
+public QueryResponse query(String documentId, QueryRequest request) { ... }
+public QueryResponse queryAllDocuments(QueryRequest request) { ... }
+
+// AFTER:
+public QueryResponse query(String documentId, QueryRequest request, String sessionId) { ... }
+public QueryResponse queryAllDocuments(QueryRequest request, String sessionId) { ... }
+```
+
+Both methods now accept an optional `sessionId` (can be null).
+
+### The `resolveSessionId` helper
+
+```java
+private String resolveSessionId(String sessionId) {
+    return (sessionId != null && !sessionId.isBlank()) ? sessionId : UUID.randomUUID().toString();
+}
+```
+
+This method ensures every query has a session ID — either reused from the client or freshly generated. It's a private helper, not part of the public API.
+
+### The `buildResponse` method — the core of the feature
+
+```java
+private QueryResponse buildResponse(String scope, String sessionId, String question, List<Document> relevantDocs) {
+
+    // 1. Build RAG context string from retrieved chunks
+    String context = relevantDocs.stream()
+            .map(Document::getText)
+            .collect(Collectors.joining("\n\n---\n\n"));
+
+    // 2. Fetch conversation history from ChatHistoryService
+    List<ChatTurn> history = chatHistoryService.getHistory(sessionId);
+
+    // 3. Convert ChatTurn records to Spring AI Message objects
+    List<Message> historyMessages = new ArrayList<>();
+    for (ChatTurn turn : history) {
+        historyMessages.add(new UserMessage(turn.question()));      // prior question
+        historyMessages.add(new AssistantMessage(turn.answer()));   // prior answer
+    }
+
+    // 4. Build and send the complete Gemini prompt
+    String answer = chatClient.prompt()
+            .system(s -> s.text(SYSTEM_PROMPT).param("context", context))
+            .messages(historyMessages)   // ← history injected here
+            .user(question)
+            .call()
+            .content();
+
+    // 5. Save this Q&A turn to the session
+    chatHistoryService.addTurn(sessionId, question, answer);
+
+    // 6. Build response (truncate chunks to 200 chars for readability)
+    List<String> chunks = relevantDocs.stream()
+            .map(doc -> {
+                String content = doc.getText();
+                return content.substring(0, Math.min(content.length(), 200)) + "...";
+            })
+            .toList();
+
+    return new QueryResponse(sessionId, answer, question, scope, chunks);
+}
+```
+
+**Step 3 in detail — converting ChatTurn to Message:**
+
+Spring AI's `ChatClient` API accepts a `List<Message>`. There are two message types we use:
+
+- `UserMessage(String text)` — represents a message sent by the user
+- `AssistantMessage(String text)` — represents a message sent by the AI/assistant
+
+The Gemini API requires messages to **alternate strictly**: User, Assistant, User, Assistant, ...
+
+If we have 2 prior turns:
+
+```
+history = [
+  ChatTurn(Q1, A1, timestamp),
+  ChatTurn(Q2, A2, timestamp)
+]
+
+historyMessages becomes:
+  [UserMessage(Q1), AssistantMessage(A1), UserMessage(Q2), AssistantMessage(A2)]
+```
+
+Then `.user(currentQuestion)` adds the current User message at the end, so the final sequence is:
+
+```
+UserMessage(Q1) → AssistantMessage(A1) → UserMessage(Q2) → AssistantMessage(A2) → UserMessage(currentQuestion)
+```
+
+This is exactly what the Gemini API expects for multi-turn conversations.
+
+**Step 4 — the ChatClient prompt chain:**
+
+```java
+chatClient.prompt()
+    .system(s -> s.text(SYSTEM_PROMPT).param("context", context))
+    // ↑ Sets the system instruction with the RAG context filled in
+    .messages(historyMessages)
+    // ↑ Injects all prior turns as multi-turn conversation history
+    .user(question)
+    // ↑ Appends the current question as the latest User message
+    .call()
+    // ↑ Makes the HTTPS request to the Gemini API
+    .content();
+    // ↑ Extracts the response text from the Gemini JSON response
+```
+
+**Why do we save the turn AFTER calling Gemini (not before)?**
+
+Because we need Gemini's answer to create the `ChatTurn`. The turn is `(question, answer, timestamp)` — we can't store it until we have the answer. If Gemini throws an exception (e.g., 429 rate limit), `chatHistoryService.addTurn` is never called, so the failed turn is not saved to history. This is correct behavior — the user can retry without a corrupted history entry.
+
+---
+
+## 12. Java Records — How ChatTurn Works Internally
+
+```java
+public record ChatTurn(String question, String answer, LocalDateTime timestamp) {}
+```
+
+`record` is a Java 16+ feature. This single line generates:
+
+1. **Three private final fields**: `question`, `answer`, `timestamp`
+2. **A canonical constructor**: `ChatTurn(String question, String answer, LocalDateTime timestamp)`
+3. **Three getter methods** (named after the fields, not `get...`): `question()`, `answer()`, `timestamp()`
+4. **`equals()`**: two `ChatTurn` objects are equal if all three fields are equal
+5. **`hashCode()`**: consistent with `equals()`
+6. **`toString()`**: `ChatTurn[question=..., answer=..., timestamp=...]`
+
+Records are **immutable** — the fields are final. You cannot do `turn.question = "..."`. You can only read values.
+
+**Why a record for ChatTurn?**
+
+- A Q&A turn is a **pure data carrier** — it has no behavior, no state changes, just data
+- Records prevent accidental mutation (no setters)
+- The auto-generated `equals`/`hashCode`/`toString` are correct by default
+- The code is concise (one line vs. 30+ lines for an equivalent class)
+
+**How it's used:**
+
+```java
+// Creation (in ChatHistoryService.addTurn):
+data.turns().addLast(new ChatTurn(question, answer, LocalDateTime.now()));
+
+// Reading (in QueryService.buildResponse):
+for (ChatTurn turn : history) {
+    historyMessages.add(new UserMessage(turn.question()));    // turn.question() — getter
+    historyMessages.add(new AssistantMessage(turn.answer())); // turn.answer() — getter
+}
+```
+
+`LocalDateTime.now()` captures the current system time at the moment the turn is recorded. This is used for auditing — you can see exactly when each turn happened.
+
+---
+
+## 13. ConcurrentHashMap vs HashMap — Deep Dive
 
 ### Why not just use `HashMap`?
 
-Our `ChatHistoryService` is a **Spring `@Service` bean** — it's a **singleton** shared across the entire application. Multiple HTTP requests arrive **simultaneously** (on different Tomcat threads). If two requests both call `sessions.put(...)` or `sessions.get(...)` at the same moment on a regular `HashMap`, you get:
+Our `ChatHistoryService` is a **Spring `@Service` singleton** — one instance shared across all threads. Tomcat uses a thread pool: each HTTP request runs on a separate thread. If 10 users are querying simultaneously, there are 10 threads, potentially all hitting `ChatHistoryService` at the same time.
 
-- **Data corruption** — HashMap can enter an inconsistent internal state during concurrent resize operations
-- **Infinite loops** — A famous Java bug where two threads rehashing simultaneously create a circular linked list in the internal bucket, causing `get()` to loop forever
-- **Lost updates** — Two `put()` operations on the same key, one overwrites the other silently
+`HashMap` was designed for single-threaded use. Under concurrent access:
 
-`ConcurrentHashMap` solves all of this with **lock striping**:
+**Problem 1: Internal state corruption during resize**
 
-- The internal array is divided into 16 segments (by default)
-- Each segment has its own lock
-- Two operations on **different** keys (different segments) proceed simultaneously with no blocking
-- Two operations on the **same** key use the same segment lock — one waits for the other
-- `get()` is completely lock-free (reads are always safe)
+`HashMap` uses an array of "buckets". When the number of entries exceeds the load factor threshold, it creates a new, larger array and re-distributes all entries (rehashing). If two threads trigger a resize simultaneously, the internal linked lists in each bucket can become corrupted or circular. A circular linked list causes `get()` to loop forever (an infinite loop with no exit condition).
 
-**Bottom line:** In a multi-threaded server, always use `ConcurrentHashMap` over `HashMap` for shared state.
+**Problem 2: Lost updates**
 
-### Why not `Hashtable` or `Collections.synchronizedMap()`?
+Two threads both try to `put(sameKey, value)` at the same time. They both read the current state, both compute the new state, and both write back. One write silently overwrites the other. One session's turn is lost.
 
-- `Hashtable` and `synchronizedMap` use a **single lock** for the entire map — only one thread can access it at a time, even if they're working on completely different keys. This is a bottleneck.
-- `ConcurrentHashMap` allows up to 16 (or more) concurrent writes — far better throughput.
+**Problem 3: Stale reads**
+
+Without proper memory visibility guarantees (`volatile` or `synchronized`), a value written by Thread A may not be visible to Thread B due to CPU caching. Thread B sees the old value.
+
+### How `ConcurrentHashMap` solves this
+
+`ConcurrentHashMap` uses **lock striping**. In Java 8+, it uses CAS (compare-and-swap) operations at the bucket level and only falls back to locking when there's a genuine conflict.
+
+```
+Internal structure (simplified):
+  Bucket 0:  [entry] → [entry]   (lock: bucket's own node lock)
+  Bucket 1:  [entry]             (lock: bucket's own node lock)
+  Bucket 2:  empty
+  ...
+  Bucket N:  [entry] → [entry]   (lock: bucket's own node lock)
+```
+
+- `get()` is **completely lock-free** — reads use volatile/CAS, no locking at all
+- `put()` only locks **one bucket** — other threads can concurrently put into different buckets
+- Resize is handled with a "forwarding node" mechanism — reads still work during resize
+- `computeIfAbsent()` is atomic — guaranteed one-time creation even under concurrent access
+
+**Practical result:** In a 16-bucket ConcurrentHashMap, 16 puts can happen simultaneously (one per bucket) with zero blocking. For 1,000 different session IDs, the probability that two concurrent operations land in the same bucket is very low — effectively concurrent.
+
+### Why not `Hashtable` or `Collections.synchronizedMap(HashMap)`?
+
+Both use **one lock for the entire map**:
+
+```java
+// synchronized HashMap — every operation locks THE ENTIRE MAP
+public synchronized V put(K key, V value) { ... }
+public synchronized V get(Object key) { ... }
+```
+
+Thread 1 doing `get("session-A")` blocks Thread 2 from doing `get("session-B")` — even though they access completely different sessions. Under high concurrency, all threads queue up to take the single lock, creating a bottleneck.
+
+`ConcurrentHashMap`'s bucket-level locking means Thread 1 and Thread 2 can proceed in parallel as long as their keys hash to different buckets (which is the case for different UUIDs with very high probability).
 
 ---
 
-## 11. Why Deque? How It Stores Q&A
+## 14. Why Deque? How It Stores Q&A
 
 ### What is a Deque?
 
-`Deque` = Double-Ended Queue — a data structure that supports efficient insertion and removal from **both ends**:
+`Deque` = **Double-Ended Queue** — a data structure that supports efficient add/remove from both ends:
 
-- `addLast(x)` — adds to the tail (newest element)
-- `pollFirst()` — removes from the head (oldest element)
-- `peek()`, iteration — works in order from head (oldest) to tail (newest)
+| Operation     | End              | Time |
+| ------------- | ---------------- | ---- |
+| `addLast(x)`  | Tail             | O(1) |
+| `addFirst(x)` | Head             | O(1) |
+| `pollFirst()` | Head (removes)   | O(1) |
+| `pollLast()`  | Tail (removes)   | O(1) |
+| `peekFirst()` | Head (read only) | O(1) |
+| Iteration     | Head → Tail      | O(n) |
 
-### Implementation: `ArrayDeque`
+We use `ArrayDeque` (backed by a circular array — resizes automatically when needed).
 
-We use `ArrayDeque` — a resizable array implementation of `Deque`. It's backed by a circular array, making both head and tail operations O(1).
+### Why Deque for a sliding window? Why not List or Queue?
 
-### Why Deque for a sliding window?
+We need **FIFO (First In, First Out) with bounded size** — oldest entry gets dropped when full.
 
-We need **FIFO with a fixed max size** — first in, first out:
+With a `List<ChatTurn>`:
+
+- Adding is easy (`list.add(turn)`)
+- Removing oldest requires `list.remove(0)` → **O(n)** because all elements shift left
+
+With a `Deque<ChatTurn>`:
+
+- Adding newest: `deque.addLast(turn)` → **O(1)**
+- Removing oldest: `deque.pollFirst()` → **O(1)**
+
+For a 5-turn window, the difference seems trivial. But conceptually, the Deque is the semantically correct choice — it is literally designed for this pattern.
+
+### The sliding window in action
 
 ```
-State after turn 5:
-    HEAD → [Q1/A1] [Q2/A2] [Q3/A3] [Q4/A4] [Q5/A5] ← TAIL
+Initial state (empty new session):
+  HEAD → [] ← TAIL
+
+After Turn 1 (Q1: "What is RAG?"):
+  HEAD → [Q1/A1] ← TAIL
+
+After Turn 2 (Q2: "How does ONNX work?"):
+  HEAD → [Q1/A1] [Q2/A2] ← TAIL
+
+After Turn 3:
+  HEAD → [Q1/A1] [Q2/A2] [Q3/A3] ← TAIL
+
+After Turn 4:
+  HEAD → [Q1/A1] [Q2/A2] [Q3/A3] [Q4/A4] ← TAIL
+
+After Turn 5 (window now full, maxTurns=5):
+  HEAD → [Q1/A1] [Q2/A2] [Q3/A3] [Q4/A4] [Q5/A5] ← TAIL
 
 Turn 6 arrives:
-    size (5) >= maxTurns (5) → pollFirst() removes [Q1/A1] from HEAD
-    addLast([Q6/A6]) at TAIL
+  size(5) >= maxTurns(5) → pollFirst() removes Q1/A1
+  addLast(Q6/A6)
+  HEAD → [Q2/A2] [Q3/A3] [Q4/A4] [Q5/A5] [Q6/A6] ← TAIL
+  ↑ Q1/A1 is gone forever. The window slides forward.
 
-State after turn 6:
-    HEAD → [Q2/A2] [Q3/A3] [Q4/A4] [Q5/A5] [Q6/A6] ← TAIL
+Turn 7:
+  pollFirst() removes Q2/A2
+  HEAD → [Q3/A3] [Q4/A4] [Q5/A5] [Q6/A6] [Q7/A7] ← TAIL
 ```
 
-A Deque is perfect for this because:
-
-- `pollFirst()` to evict oldest: **O(1)**
-- `addLast()` to add newest: **O(1)**
-- Iteration gives chronological order (oldest to newest): exactly what Gemini needs
+When we iterate this Deque and send to Gemini, the order is always HEAD to TAIL = **oldest to newest**, which is the correct chronological order for a conversation.
 
 ### What is stored in each ChatTurn?
 
@@ -607,67 +1105,130 @@ A Deque is perfect for this because:
 public record ChatTurn(String question, String answer, LocalDateTime timestamp) {}
 ```
 
-- `question` — the user's question text
-- `answer` — Gemini's response text
-- `timestamp` — when this turn happened (for debugging/auditing)
+- `question` — the exact text of the user's question
+- `answer` — the exact text of Gemini's response
+- `timestamp` — `LocalDateTime.now()` at the time the turn was saved
 
-### How it's sent to Gemini
-
-```java
-for (ChatTurn turn : history) {
-    historyMessages.add(new UserMessage(turn.question()));
-    historyMessages.add(new AssistantMessage(turn.answer()));
-}
-// Gemini's API expects messages to alternate: User, Assistant, User, Assistant, ...
-```
+These are stored as plain strings. No compression, no truncation — the full text. This means a session with 5 very long Q&A turns could take significant memory (in the worst case, hundreds of KB per session). For a development/portfolio app this is fine; production systems would set lower limits or use a persistent store.
 
 ---
 
-## 12. Why synchronized on the Deque?
+## 15. Why synchronized on the Deque?
 
-This is a subtle but important concurrency point.
+This is the most subtle concurrency point in the application and a common interview topic.
 
-```java
-private record SessionData(Deque<ChatTurn> turns, AtomicLong lastActiveMs) {}
-private final ConcurrentHashMap<String, SessionData> sessions = new ConcurrentHashMap<>();
+### The misconception
+
+"I'm using `ConcurrentHashMap` — so everything is thread-safe, right?"
+
+**Wrong.** `ConcurrentHashMap` only makes the **map operations** (`get`, `put`, `remove`, `computeIfAbsent`) thread-safe. It says nothing about the safety of the **values stored in the map**.
+
+The `SessionData` inside each map value contains an `ArrayDeque`. `ArrayDeque` is **explicitly documented as not thread-safe**. Its internal array can be corrupted if two threads access it simultaneously.
+
+### The exact scenario that would go wrong without synchronization
+
+```
+Time     Thread A (Request 1: reading history)         Thread B (Request 2: adding turn)
+────────────────────────────────────────────────────────────────────────────────────────
+T1       getHistory("abc"):
+         data = sessions.get("abc") → SessionData
+         for (ChatTurn t : data.turns()) {            addTurn("abc", Q, A):
+         ↑ starts iterating ArrayDeque                data = sessions.get("abc") → same SessionData
+T2       [iterating turn 0...]                        data.turns().addLast(newTurn)
+                                                      ↑ MODIFIES ArrayDeque DURING ITERATION
+T3       [iterating turn 1...]
+         ↑ ArrayDeque's internal modCount changed!
+         → ConcurrentModificationException!
 ```
 
-**`ConcurrentHashMap` only makes the MAP operations thread-safe** — it protects `put`, `get`, `remove` on the map itself. It does NOT make the **values** inside the map thread-safe.
+`ArrayDeque` (and most Java collections) maintain a modification counter (`modCount`). When iteration starts, it records the current `modCount`. On every `next()` call, it checks that `modCount` hasn't changed. If another thread modified the Deque during iteration, `modCount` changes → `ConcurrentModificationException` is thrown.
 
-Consider this scenario:
-
-- Thread A is reading history for session `xyz` (iterating the Deque)
-- Thread B simultaneously adds a new turn to the same session's Deque
-- `ArrayDeque` is **not thread-safe** — concurrent read + write can cause `ConcurrentModificationException` or corrupted iteration
-
-That's why both `getHistory` and `addTurn` synchronize on the **Deque object itself**:
+### How `synchronized (data.turns())` fixes this
 
 ```java
-// In getHistory:
+// Thread A: getHistory
 synchronized (data.turns()) {
-    return new ArrayList<>(data.turns()); // snapshot — safe copy
+    return new ArrayList<>(data.turns());  // copy while locked
 }
 
-// In addTurn:
+// Thread B: addTurn
 synchronized (data.turns()) {
-    if (data.turns().size() >= maxTurns) {
-        data.turns().pollFirst();
-    }
-    data.turns().addLast(new ChatTurn(...));
+    data.turns().addLast(...);  // modify while locked
 }
 ```
 
-The `synchronized (data.turns())` block uses the **Deque instance as a monitor lock**. Java guarantees only one thread can hold a given object's monitor at a time. So:
+`synchronized (data.turns())` uses the **Deque object itself as a monitor lock** (a.k.a. intrinsic lock). The JVM guarantees:
 
-- If Thread A is inside `getHistory`'s synchronized block, Thread B's `addTurn` synchronized block **waits**
-- They can't execute concurrently on the same session's Deque
+> At most one thread can hold a given object's monitor at any time.
 
-**Why is `lastActiveMs` an `AtomicLong` (not `synchronized`)?**
-`AtomicLong` uses CPU-level compare-and-swap (CAS) instructions — a lock-free way to do atomic reads and writes on a single `long`. We only need `set()` and `get()` on it — no need for the overhead of a synchronized block. CAS is faster than synchronization for single-variable operations.
+So if Thread A is inside its `synchronized (data.turns())` block, Thread B's `synchronized (data.turns())` block **waits** — it cannot enter until Thread A exits. This ensures reads and writes to the same Deque never overlap.
+
+**Why `data.turns()` is a valid lock object:**
+
+The `SessionData` record's `turns()` method always returns the **same** `ArrayDeque` instance. `synchronized` uses object identity (memory address) for locking — as long as all threads lock on the exact same object, mutual exclusion is guaranteed. Since `SessionData` is immutable (its `turns` reference is final), `data.turns()` always returns the same `ArrayDeque`.
+
+### Why is `lastActiveMs` an `AtomicLong` instead of `synchronized`?
+
+Because `lastActiveMs` only needs **single-variable atomic reads and writes**:
+
+```java
+data.lastActiveMs().set(System.currentTimeMillis());  // atomic write
+data.lastActiveMs().get();                             // atomic read
+```
+
+`AtomicLong` uses CPU-level compare-and-swap (CAS) instructions, which are:
+
+1. **Lock-free** — no thread ever waits; CAS retries on contention but never blocks
+2. **Faster** than `synchronized` for single-variable operations
+3. **Sufficient** — we don't need a compound check-then-act operation on `lastActiveMs`
+
+If we used `synchronized` for `lastActiveMs`, we'd need a dedicated lock object for it (or synchronize on the Deque, mixing concerns). `AtomicLong` is cleaner and faster.
 
 ---
 
-## 13. Session ID — Generation, Lifecycle, Expiry
+## 16. computeIfAbsent — Thread Safety Guarantee
+
+```java
+SessionData data = sessions.computeIfAbsent(sessionId,
+        id -> new SessionData(new ArrayDeque<>(), new AtomicLong(System.currentTimeMillis())));
+```
+
+### What it does
+
+`computeIfAbsent(key, mappingFunction)`:
+
+1. Look up `key` in the map
+2. If present → return existing value (lambda never called)
+3. If absent → call lambda to compute the value → store it → return it
+
+### Why this is important for concurrency
+
+Consider two threads simultaneously calling `addTurn` for the **same new session ID** for the first time (e.g., two HTTP requests arrive in the same millisecond with no `X-Session-Id` header and the server generates the same... wait, UUIDs are essentially unique. But consider a client sending the same `X-Session-Id` in two simultaneous requests):
+
+```
+Thread A: sessions.computeIfAbsent("abc", id -> new SessionData(...))
+Thread B: sessions.computeIfAbsent("abc", id -> new SessionData(...))
+```
+
+**Without atomicity (hypothetical broken code using get/put):**
+
+```java
+// WRONG — race condition:
+if (!sessions.containsKey(sessionId)) {
+    sessions.put(sessionId, new SessionData(...));
+}
+SessionData data = sessions.get(sessionId);
+```
+
+Thread A reads `containsKey` → false. Thread B reads `containsKey` → false. Thread A creates and puts SessionData1. Thread B creates and puts SessionData2 (overwriting SessionData1). Thread A then calls `data.turns()` on SessionData1, but the map now has SessionData2. The turns Thread A appends go to a `SessionData` that is no longer referenced by the map — they're lost.
+
+**With `computeIfAbsent`:**
+
+`ConcurrentHashMap.computeIfAbsent` is guaranteed to execute the lambda **at most once per key** even under concurrent access. If Thread A and Thread B race, one of them wins and creates the `SessionData`. The other thread simply gets the value the winner created. The lambda is never called twice for the same key.
+
+---
+
+## 17. Session ID — Generation, Lifecycle, Expiry
 
 ### Generation
 
@@ -678,64 +1239,134 @@ private String resolveSessionId(String sessionId) {
 ```
 
 - If the client sends `X-Session-Id: abc-123` → use `abc-123`
-- If missing or blank → generate `UUID.randomUUID()` → `"3f2a1b8c-4d5e-6f7a-8b9c-0d1e2f3a4b5c"`
+- If missing or blank → generate `UUID.randomUUID()` → e.g., `"3f2a1b8c-4d5e-6f7a-8b9c-0d1e2f3a4b5c"`
 
-**UUID v4** is 128 bits of randomness. There are 2^122 possible UUIDs (~5.3 × 10^36). The probability of a collision is astronomically small — for all practical purposes, every generated UUID is globally unique.
+**UUID v4** is 128 bits of randomness (122 bits effective, 6 bits are version/variant markers). There are $2^{122} \approx 5.3 \times 10^{36}$ possible UUIDs. If you generated 1 billion UUIDs per second for the age of the universe, the probability of a collision would still be negligibly small.
 
 ### Full lifecycle
 
 ```
-Request arrives (no X-Session-Id)
-    │
-    ▼
-resolveSessionId() → UUID.randomUUID() → "abc-123"
-    │
-    ▼
-chatHistoryService.getHistory("abc-123")
-    → sessions.get("abc-123") returns null
-    → returns empty List.of()
-    → history is empty, no messages sent to Gemini
-    │
-    ▼
-Gemini answers the question
-    │
-    ▼
-chatHistoryService.addTurn("abc-123", question, answer)
-    → sessions.computeIfAbsent("abc-123", ...) creates new SessionData
-    → new ArrayDeque, new AtomicLong(now)
-    → ChatTurn added to Deque
-    │
-    ▼
-Response returned: { "sessionId": "abc-123", ... }
-    │
-    ▼  (Client saves sessionId, sends it next time)
-    │
-Next request arrives (X-Session-Id: abc-123)
-    │
-    ▼
-resolveSessionId() → "abc-123" (reused)
-    │
-    ▼
-chatHistoryService.getHistory("abc-123")
-    → sessions.get("abc-123") → found
-    → lastActiveMs updated
-    → returns [ChatTurn(Q1, A1)]
-    │
-    ▼
-[Q1, A1] injected into Gemini prompt as history
+First request (no X-Session-Id sent):
+─────────────────────────────────────────────────────────
+resolveSessionId(null) → UUID.randomUUID() → "sess-abc"
+getHistory("sess-abc") → sessions.get("sess-abc") = null → List.of()
+  (no history → no history messages sent to Gemini)
+Gemini answers first question
+addTurn("sess-abc", Q1, A1):
+  computeIfAbsent("sess-abc") creates new SessionData(ArrayDeque, AtomicLong(now))
+  Deque: [ChatTurn(Q1, A1, now)]
+Response: { "sessionId": "sess-abc", "answer": "..." }
+                │
+                ▼ (Client saves "sess-abc", sends it next time)
+
+Second request (X-Session-Id: sess-abc):
+─────────────────────────────────────────────────────────
+resolveSessionId("sess-abc") → "sess-abc" (reused as-is)
+getHistory("sess-abc") → sessions.get("sess-abc") = SessionData found!
+  lastActiveMs updated to now
+  returns snapshot of Deque: [ChatTurn(Q1, A1, ...)]
+historyMessages = [UserMessage(Q1), AssistantMessage(A1)]
+Gemini receives: system + Q1/A1 history + Q2 (current question)
+Gemini answers Q2 with context of Q1/A1
+addTurn("sess-abc", Q2, A2):
+  Deque: [ChatTurn(Q1, A1), ChatTurn(Q2, A2)]
+Response: { "sessionId": "sess-abc", "answer": "..." (knows about Q1)" }
 ```
 
-### The SessionData record
+### The `SessionData` internal record
 
 ```java
 private record SessionData(Deque<ChatTurn> turns, AtomicLong lastActiveMs) {}
 ```
 
-`lastActiveMs` tracks when this session was last used. Updated on every `getHistory` and `addTurn` call. Used by the cleanup job to detect idle sessions.
+- `turns` → an `ArrayDeque<ChatTurn>` — the Q&A history, max 5 entries
+- `lastActiveMs` → an `AtomicLong` — the epoch millisecond of last `getHistory` or `addTurn` call
+
+Both fields are declared in the record and are final references (you can't change which `ArrayDeque` or which `AtomicLong` they point to). The contents of the `ArrayDeque` and the value inside the `AtomicLong` do change — that's the mutable state.
 
 ---
 
-## 14. Why 5 Turns? Why Not Unlimited?
+## 18. How Gemini Receives the Full Conversation
+
+When `chatClient.prompt()...call()` executes, Spring AI serializes the prompt into the Google Generative AI API format and sends an HTTPS POST.
+
+### The Java prompt chain
+
+```java
+chatClient.prompt()
+    .system(s -> s.text(SYSTEM_PROMPT).param("context", context))
+    .messages(historyMessages)
+    .user(question)
+    .call()
+    .content()
+```
+
+### What gets sent over the wire (JSON)
+
+For a conversation with 1 prior turn ("What is RAG?" / "RAG stands for...") and current question "How does it differ from keyword search?":
+
+```json
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=...
+Content-Type: application/json
+
+{
+  "system_instruction": {
+    "parts": [{
+      "text": "You are a helpful assistant that answers questions based on the provided context.\nUse ONLY the information from the context below...\n\nContext:\n[chunk1 text]\n\n---\n\n[chunk2 text]\n\n---\n\n[chunk3 text]\n\n---\n\n[chunk4 text]"
+    }]
+  },
+  "contents": [
+    {
+      "role": "user",
+      "parts": [{ "text": "What is RAG?" }]
+    },
+    {
+      "role": "model",
+      "parts": [{ "text": "RAG stands for Retrieval Augmented Generation. It is a technique that..." }]
+    },
+    {
+      "role": "user",
+      "parts": [{ "text": "How does it differ from keyword search?" }]
+    }
+  ],
+  "generationConfig": {
+    "temperature": 0.2
+  }
+}
+```
+
+**Note:** The Google API calls the AI role `"model"` (not `"assistant"`). Spring AI's `AssistantMessage` is automatically serialized with `"role": "model"` when using the Google GenAI adapter.
+
+### What Gemini returns
+
+```json
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "Unlike keyword search which looks for exact word matches, RAG uses semantic vector similarity. So even if your document says 'notice period' and you ask about 'how long before leaving', the vectors will be similar because the meaning is the same..."
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP"
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 2847,
+    "candidatesTokenCount": 156,
+    "totalTokenCount": 3003
+  }
+}
+```
+
+`chatClient.call().content()` extracts `candidates[0].content.parts[0].text` — the answer string.
+
+---
+
+## 19. Why 5 Turns? Why Not Unlimited?
 
 ### Token budget math
 
@@ -766,7 +1397,7 @@ Configurable via `app.rag.chat-history.max-turns=5` in `application.properties` 
 
 ---
 
-## 15. What Happens When a Session Expires?
+## 20. What Happens When a Session Expires?
 
 ### TTL cleanup mechanism
 
@@ -803,7 +1434,58 @@ Shorter intervals (e.g., every 10 seconds) would waste CPU. Longer intervals (e.
 
 ---
 
-## 16. Spring Security Filter Chain
+## 21. Spring @Scheduled — How TTL Cleanup Works
+
+### Two annotations working together
+
+**`@EnableScheduling` on the main class:**
+
+```java
+@SpringBootApplication(exclude = {TransformersEmbeddingModelAutoConfiguration.class})
+@EnableScheduling   // ← added in the conversational memory feature
+public class SpringRagApplication { ... }
+```
+
+`@EnableScheduling` tells Spring: "scan all beans for `@Scheduled` methods and register them with a background executor". Without this annotation, `@Scheduled` methods are completely ignored — they're never called.
+
+**`@Scheduled(fixedRate = 300_000)` on the cleanup method:**
+
+```java
+@Scheduled(fixedRate = 300_000)
+public void evictExpiredSessions() { ... }
+```
+
+`fixedRate = 300_000` means: **run every 300,000 milliseconds regardless of how long the previous execution took**. If the cleanup takes 50ms, the next run starts at T+300,000ms (not T+300,050ms). This is "wall-clock rate" scheduling.
+
+Alternative: `fixedDelay = 300_000` would mean "wait 300,000ms after the previous execution finishes". For a cleanup job, `fixedRate` is the more appropriate choice — we want it to run at regular intervals.
+
+### The cleanup logic
+
+```java
+long cutoffMs = System.currentTimeMillis() - (ttlMinutes * 60_000L);
+```
+
+If `ttlMinutes = 30`:
+
+```
+cutoffMs = now - (30 × 60,000) = now - 1,800,000 ms
+```
+
+Any session whose `lastActiveMs < cutoffMs` hasn't been used in over 30 minutes → expired.
+
+```java
+sessions.entrySet().removeIf(e -> e.getValue().lastActiveMs().get() < cutoffMs);
+```
+
+`ConcurrentHashMap.entrySet().removeIf()` is thread-safe. The lambda is called for each entry. If it returns `true`, the entry is atomically removed. Other threads can safely `get`, `put`, and `computeIfAbsent` on the map during this operation.
+
+### Which thread runs `@Scheduled`?
+
+Spring creates a **background thread** (from a `TaskScheduler` thread pool) to run `@Scheduled` methods. This is completely separate from Tomcat's HTTP request threads. The cleanup runs in the background without affecting request-handling performance.
+
+---
+
+## 22. Spring Security Filter Chain
 
 Every HTTP request goes through this chain before reaching any controller:
 
@@ -853,7 +1535,7 @@ Spring Security won't create an `HttpSession`. No server-side session store. The
 
 ---
 
-## 17. Exception Handling Strategy
+## 23. Exception Handling Strategy
 
 `GlobalExceptionHandler` (`@RestControllerAdvice`) intercepts all exceptions thrown from controllers and services, converting them to structured JSON responses.
 
@@ -893,7 +1575,7 @@ public ResponseEntity<...> handleGeneral(Exception ex) {
 
 ---
 
-## 18. Actuator — Monitoring & Observability
+## 24. Actuator — Monitoring & Observability
 
 Spring Boot Actuator exposes management endpoints.
 
@@ -921,7 +1603,7 @@ Spring Boot Actuator exposes management endpoints.
 
 ---
 
-## 19. Configuration Properties Reference
+## 25. Configuration Properties Reference
 
 All configurable settings in `application.properties`:
 
@@ -973,7 +1655,7 @@ info.app.version=0.0.1-SNAPSHOT
 
 ---
 
-## 20. Complete Request Flow — End to End
+## 26. Complete Request Flow — End to End
 
 ### Scenario: User uploads a document, asks a question, asks a follow-up
 
@@ -1066,71 +1748,349 @@ X-Session-Id: sess-abc
 
 ---
 
-## 21. What Changed: Base RAG vs Conversational RAG
+## 27. What Changed: Base RAG vs Conversational RAG
 
-### New files added
+This section is a complete, file-by-file diff of every change made to implement conversational memory.
 
-| File                            | Purpose                                              |
-| ------------------------------- | ---------------------------------------------------- |
-| `dto/ChatTurn.java`             | Immutable record holding one Q&A pair with timestamp |
-| `query/ChatHistoryService.java` | In-memory session store, sliding window, TTL cleanup |
+### New files created (2 files)
 
-### Modified files
-
-**`SpringRagApplication.java`** — Added `@EnableScheduling`
+**`src/main/java/com/ragapp/dto/ChatTurn.java`** — brand new
 
 ```java
-// Before
-@SpringBootApplication(exclude = {...})
-public class SpringRagApplication { ... }
+package com.ragapp.dto;
 
-// After
-@SpringBootApplication(exclude = {...})
-@EnableScheduling  // ← required for @Scheduled to work
-public class SpringRagApplication { ... }
+import java.time.LocalDateTime;
+
+public record ChatTurn(String question, String answer, LocalDateTime timestamp) {}
 ```
 
-**`dto/QueryResponse.java`** — Added `sessionId` field
+A Java 16 `record` — one Q&A turn. Immutable. Auto-generates constructor, getters, `equals`, `hashCode`, `toString`. Three fields: the question text, Gemini's answer text, and when it happened.
+
+**`src/main/java/com/ragapp/query/ChatHistoryService.java`** — brand new
+
+The complete session management service. See [Section 10](#10-chathistoryservice--complete-code-walkthrough) for full line-by-line explanation.
+
+---
+
+### Modified files (5 files)
+
+#### `SpringRagApplication.java` — 1 annotation added
 
 ```java
-// Before
-public record QueryResponse(String answer, String question, String documentId, List<String> relevantChunks) {}
+// BEFORE:
+@SpringBootApplication(exclude = {TransformersEmbeddingModelAutoConfiguration.class})
+public class SpringRagApplication {
+    public static void main(String[] args) {
+        SpringApplication.run(SpringRagApplication.class, args);
+    }
+}
 
-// After
-public record QueryResponse(String sessionId, String answer, String question, String documentId, List<String> relevantChunks) {}
+// AFTER:
+@SpringBootApplication(exclude = {TransformersEmbeddingModelAutoConfiguration.class})
+@EnableScheduling                    // ← THIS LINE ADDED
+public class SpringRagApplication {
+    public static void main(String[] args) {
+        SpringApplication.run(SpringRagApplication.class, args);
+    }
+}
 ```
 
-**`query/QueryService.java`** — Core changes
+`@EnableScheduling` activates Spring's task scheduling infrastructure. Without it, the `@Scheduled` annotation on `ChatHistoryService.evictExpiredSessions()` is silently ignored.
 
-- Constructor now injects `ChatHistoryService`
-- `query()` and `queryAllDocuments()` accept `sessionId` parameter
-- `resolveSessionId()` helper: reuse or generate UUID
-- `buildResponse()` fetches history, converts to `Message` objects, injects into prompt, saves turn after response
+---
 
-**`query/QueryController.java`** — New `@RequestHeader`
+#### `dto/QueryResponse.java` — 1 field added
 
 ```java
-// Before
-public ResponseEntity<QueryResponse> queryDocument(@PathVariable String documentId, @Valid @RequestBody QueryRequest request)
+// BEFORE:
+public record QueryResponse(
+    String answer,
+    String question,
+    String documentId,
+    List<String> relevantChunks
+) {}
 
-// After
-public ResponseEntity<QueryResponse> queryDocument(@PathVariable String documentId,
-    @Valid @RequestBody QueryRequest request,
-    @RequestHeader(value = "X-Session-Id", required = false) String sessionId)
+// AFTER:
+public record QueryResponse(
+    String sessionId,          // ← ADDED (first field)
+    String answer,
+    String question,
+    String documentId,
+    List<String> relevantChunks
+) {}
 ```
 
-**`query/GlobalQueryController.java`** — Same header change
+`sessionId` was added as the **first** field. In Java records, the constructor parameter order determines the JSON serialization order. By putting `sessionId` first, it appears first in the response body, making it easy to spot and copy from the Postman response.
 
-**`application.properties`** — Two new properties
+The client uses this returned `sessionId` on its first call (when it didn't send a header) — it saves this value and sends it as `X-Session-Id` on subsequent requests.
 
-```properties
-app.rag.chat-history.max-turns=5
-app.rag.chat-history.ttl-minutes=30
+---
+
+#### `query/QueryController.java` — 1 parameter added
+
+```java
+// BEFORE:
+@PostMapping("/{documentId}/query")
+public ResponseEntity<QueryResponse> queryDocument(
+        @PathVariable String documentId,
+        @Valid @RequestBody QueryRequest request
+) {
+    QueryResponse response = queryService.query(documentId, request);
+    return ResponseEntity.ok(response);
+}
+
+// AFTER:
+@PostMapping("/{documentId}/query")
+public ResponseEntity<QueryResponse> queryDocument(
+        @PathVariable String documentId,
+        @Valid @RequestBody QueryRequest request,
+        @RequestHeader(value = "X-Session-Id", required = false) String sessionId   // ← ADDED
+) {
+    QueryResponse response = queryService.query(documentId, request, sessionId);    // ← sessionId passed
+    return ResponseEntity.ok(response);
+}
+```
+
+`@RequestHeader(value = "X-Session-Id", required = false)` — Spring reads the `X-Session-Id` HTTP header and injects it as the `sessionId` parameter. `required = false` means if the header is absent, `sessionId` is `null` (no 400 error).
+
+---
+
+#### `query/GlobalQueryController.java` — same change as QueryController
+
+```java
+// BEFORE:
+@PostMapping
+public ResponseEntity<QueryResponse> queryAllDocuments(
+        @Valid @RequestBody QueryRequest request
+) {
+    QueryResponse response = queryService.queryAllDocuments(request);
+    return ResponseEntity.ok(response);
+}
+
+// AFTER:
+@PostMapping
+public ResponseEntity<QueryResponse> queryAllDocuments(
+        @Valid @RequestBody QueryRequest request,
+        @RequestHeader(value = "X-Session-Id", required = false) String sessionId   // ← ADDED
+) {
+    QueryResponse response = queryService.queryAllDocuments(request, sessionId);    // ← sessionId passed
+    return ResponseEntity.ok(response);
+}
 ```
 
 ---
 
-## 22. Interview Questions & Model Answers
+#### `query/QueryService.java` — multiple changes
+
+**Change 1: New field and constructor parameter**
+
+```java
+// BEFORE — 3 dependencies:
+private final SimpleVectorStore vectorStore;
+private final ChatClient chatClient;
+private final DocumentService documentService;
+
+public QueryService(SimpleVectorStore vectorStore, ChatModel chatModel,
+                    DocumentService documentService) {
+    this.vectorStore = vectorStore;
+    this.chatClient = ChatClient.builder(chatModel).build();
+    this.documentService = documentService;
+}
+
+// AFTER — 4 dependencies:
+private final SimpleVectorStore vectorStore;
+private final ChatClient chatClient;
+private final DocumentService documentService;
+private final ChatHistoryService chatHistoryService;   // ← ADDED
+
+public QueryService(SimpleVectorStore vectorStore, ChatModel chatModel,
+                    DocumentService documentService, ChatHistoryService chatHistoryService) {
+    this.vectorStore = vectorStore;
+    this.chatClient = ChatClient.builder(chatModel).build();
+    this.documentService = documentService;
+    this.chatHistoryService = chatHistoryService;   // ← ADDED
+}
+```
+
+**Change 2: Method signatures — added `sessionId` parameter**
+
+```java
+// BEFORE:
+public QueryResponse query(String documentId, QueryRequest request) { ... }
+public QueryResponse queryAllDocuments(QueryRequest request) { ... }
+
+// AFTER:
+public QueryResponse query(String documentId, QueryRequest request, String sessionId) { ... }
+public QueryResponse queryAllDocuments(QueryRequest request, String sessionId) { ... }
+```
+
+**Change 3: Added `resolveSessionId` helper (new private method)**
+
+```java
+private String resolveSessionId(String sessionId) {
+    return (sessionId != null && !sessionId.isBlank()) ? sessionId : UUID.randomUUID().toString();
+}
+```
+
+**Change 4: `buildResponse` — injected history into Gemini prompt**
+
+```java
+// BEFORE — buildResponse did NOT take sessionId, had NO history logic:
+private QueryResponse buildResponse(String scope, String question, List<Document> relevantDocs) {
+    String context = relevantDocs.stream()
+            .map(Document::getText)
+            .collect(Collectors.joining("\n\n---\n\n"));
+
+    String answer = chatClient.prompt()
+            .system(s -> s.text(SYSTEM_PROMPT).param("context", context))
+            .user(question)
+            .call()
+            .content();
+
+    // returned QueryResponse without sessionId field
+    return new QueryResponse(answer, question, scope, chunks);
+}
+
+// AFTER — buildResponse takes sessionId, fetches history, injects into prompt, saves turn:
+private QueryResponse buildResponse(String scope, String sessionId, String question, List<Document> relevantDocs) {
+    String context = relevantDocs.stream()
+            .map(Document::getText)
+            .collect(Collectors.joining("\n\n---\n\n"));
+
+    // ← NEW: fetch history
+    List<ChatTurn> history = chatHistoryService.getHistory(sessionId);
+    List<Message> historyMessages = new ArrayList<>();
+    for (ChatTurn turn : history) {
+        historyMessages.add(new UserMessage(turn.question()));
+        historyMessages.add(new AssistantMessage(turn.answer()));
+    }
+
+    String answer = chatClient.prompt()
+            .system(s -> s.text(SYSTEM_PROMPT).param("context", context))
+            .messages(historyMessages)   // ← NEW: inject history
+            .user(question)
+            .call()
+            .content();
+
+    // ← NEW: save this turn
+    chatHistoryService.addTurn(sessionId, question, answer);
+
+    // returned QueryResponse now includes sessionId
+    return new QueryResponse(sessionId, answer, question, scope, chunks);
+}
+```
+
+---
+
+#### `application.properties` — 2 new properties added
+
+```properties
+# BEFORE: no chat-history properties
+
+# AFTER: two new properties added
+app.rag.chat-history.max-turns=5      # ← NEW
+app.rag.chat-history.ttl-minutes=30   # ← NEW
+```
+
+Also the API key was changed to use an environment variable (separate from conversational memory):
+
+```properties
+# BEFORE (API key hardcoded — revoked by Google scanner):
+spring.ai.google.genai.api-key=AIzaSy...
+
+# AFTER (API key from environment variable):
+spring.ai.google.genai.api-key=${GEMINI_API_KEY:}
+```
+
+`${GEMINI_API_KEY:}` — Spring's property placeholder. Reads the `GEMINI_API_KEY` environment variable. The `:` at the end means "empty string if not set" (prevents startup failure when the env var is missing).
+
+---
+
+## 28. In-Memory Data Structure — What Lives in RAM
+
+Here is a complete picture of what is stored in the JVM heap while the app is running.
+
+### SimpleVectorStore (document storage)
+
+```
+SimpleVectorStore.store:
+ConcurrentHashMap<String, Document> {
+  "uuid-chunk-1" → Document {
+    text:      "Payment terms are Net-30. Invoice must be...",
+    embedding: float[384] { 0.23f, -0.11f, 0.84f, ... },
+    metadata:  { "documentId": "f1a2b3-...", "source": "contract.pdf" }
+  },
+  "uuid-chunk-2" → Document {
+    text:      "Late fees of 2% per month apply after day 31...",
+    embedding: float[384] { 0.21f, -0.09f, 0.79f, ... },
+    metadata:  { "documentId": "f1a2b3-...", "source": "contract.pdf" }
+  },
+  ... (one entry per chunk, for every uploaded document)
+}
+```
+
+Each `float[384]` takes 384 × 4 bytes = **1,536 bytes = 1.5 KB** per chunk. A 10-page PDF producing 30 chunks would use 30 × 1.5 KB = **45 KB** just for embeddings (plus the text itself).
+
+### DocumentService.documentStore (document registry)
+
+```
+documentStore:
+ConcurrentHashMap<String, DocumentInfo> {
+  "f1a2b3-..." → DocumentInfo {
+    documentId: "f1a2b3-...",
+    filename:   "contract.pdf",
+    chunks:     30
+  },
+  "a7b8c9-..." → DocumentInfo {
+    documentId: "a7b8c9-...",
+    filename:   "policy.docx",
+    chunks:     15
+  }
+}
+```
+
+### ChatHistoryService.sessions (conversational memory)
+
+```
+sessions:
+ConcurrentHashMap<String, SessionData> {
+  "sess-abc-123" → SessionData {
+    turns: ArrayDeque<ChatTurn> [
+      HEAD → ChatTurn {
+               question:  "What are the payment terms?",
+               answer:    "The payment terms are Net-30, meaning...",
+               timestamp: 2026-05-02T10:15:23
+             },
+             ChatTurn {
+               question:  "Can you elaborate on the late fee?",
+               answer:    "Late fees are 2% per month starting from day 31...",
+               timestamp: 2026-05-02T10:16:45
+             }  ← TAIL
+    ],
+    lastActiveMs: AtomicLong(1746177405000)  ← epoch ms of last activity
+  },
+  "sess-xyz-456" → SessionData {
+    turns: ArrayDeque<ChatTurn> [ ... ],
+    lastActiveMs: AtomicLong(...)
+  }
+}
+```
+
+### Everything is lost on restart
+
+**SimpleVectorStore** and **ChatHistoryService** both store data in JVM heap memory. When the application stops (or crashes), all of this is lost:
+
+- All uploaded documents and their vector embeddings disappear
+- All conversation sessions and their history disappear
+
+For production, you would use:
+
+- **pgvector** (PostgreSQL extension) or **Pinecone** for persistent vector storage
+- **Redis** or a database for session/conversation history persistence
+
+---
+
+## 29. Interview Questions & Model Answers
 
 **Q: What is RAG and why do we use it?**
 RAG (Retrieval Augmented Generation) solves the knowledge gap in LLMs. LLMs are trained on public data and don't know about your private documents. RAG retrieves the most relevant document chunks using vector similarity search and injects them as context into the LLM prompt. The LLM is constrained to only use that context, which prevents hallucination and gives grounded, accurate answers about your specific documents.
@@ -1164,3 +2124,68 @@ The ONNX transformer model produces one 384-dimensional vector per token (not pe
 
 **Q: How does the per-document vs. global query work?**
 Both use vector similarity search on the same `SimpleVectorStore`. The difference is the filter expression. Per-document queries pass `filterExpression = "documentId == '{id}'"` so only chunks tagged with that document's UUID are candidates. Global queries don't pass a filter, so every stored chunk across all uploaded documents is a candidate. The same cosine similarity ranking applies — the top 4 most relevant chunks are returned regardless.
+
+**Q: What is a Java record and why did you use it for ChatTurn?**
+A record is a Java 16+ feature for immutable data carriers. The single line `public record ChatTurn(String question, String answer, LocalDateTime timestamp) {}` auto-generates a canonical constructor, three accessor methods (`question()`, `answer()`, `timestamp()`), `equals()`, `hashCode()`, and `toString()`. We used it for `ChatTurn` because a Q&A turn is pure data — it has no behavior, should never change after creation, and the boilerplate-free syntax keeps the code clean.
+
+**Q: Why did you add @EnableScheduling to the main class?**
+`@EnableScheduling` activates Spring's task scheduling infrastructure at startup. Without it, the `@Scheduled` annotation on methods is completely ignored — no background thread is created, no method is ever called. We added it because `ChatHistoryService.evictExpiredSessions()` uses `@Scheduled(fixedRate = 300_000)` to clean up idle sessions every 5 minutes. This annotation was the only change needed to the main class to enable the entire TTL cleanup mechanism.
+
+**Q: Why is `computeIfAbsent` used instead of `get` + `put` for creating new sessions?**
+`get` + `put` is not atomic. If two threads simultaneously try to create the same session for the first time, both would see `get()` return null, both would create a new `SessionData`, and one would overwrite the other's. The turn added by the first thread would be in a `SessionData` that's no longer referenced by the map — lost. `ConcurrentHashMap.computeIfAbsent` is guaranteed to call the lambda at most once per key even under concurrent access. The winner's `SessionData` is stored; the loser gets back the same stored value without creating a new one.
+
+**Q: Why store history server-side instead of having the client send the history in every request?**
+Three reasons: First, payload size — sending 5 turns of Q&A in every request body is wasteful (hundreds of characters per turn, multiplied by concurrent users). The client just sends a 36-character UUID. Second, security — the server controls the window size and TTL; a malicious client cannot inject fake history or bypass limits. Third, simplicity — the client only needs to remember one string (the session ID), not manage conversation state.
+
+**Q: What is Apache Tika and why do you use it for document parsing?**
+Apache Tika is a content analysis toolkit that can extract text from over 1,000 file formats using a single API. It auto-detects the file type from magic bytes (not the file extension), then uses the appropriate parser — PDFBox for PDFs, Apache POI for Office documents, NekoHTML for HTML, etc. We use it because the app needs to accept any document type the user might upload, and Tika handles all the format-specific complexity under a single `TikaDocumentReader` class.
+
+**Q: What is chunking and why is the overlap (100 tokens) important?**
+Chunking splits a document into smaller pieces because embedding models have a maximum input length (~512 tokens) and the ONNX model needs to embed each piece. Overlap (100 tokens shared between adjacent chunks) is important to prevent information loss at chunk boundaries. Consider a sentence that starts at token 750 and ends at token 820 in a document. With a 800-token chunk size and no overlap, this sentence would be split — half in chunk 0, half in chunk 1. With 100-token overlap, chunk 1 starts at token 700, so this sentence is fully present in chunk 1. This ensures retrieval can find complete, contextually whole passages.
+
+**Q: How does SimpleVectorStore do similarity search? Is it O(n)?**
+Yes, it's O(n) — a linear scan. For every query, it computes cosine similarity between the query vector and every single stored chunk vector, then returns the top-K. This is called "exact search" or "brute-force search." For a development app with a few hundred chunks, this is perfectly fast (milliseconds). For production with millions of chunks, you'd use an Approximate Nearest Neighbor (ANN) index (like HNSW used in Pinecone, pgvector, Milvus) which gives O(log n) search at the cost of approximate (not exact) results.
+
+**Q: What is the temperature setting (0.2) in Gemini and why did you choose it?**
+Temperature controls the randomness of the LLM's output. 0.0 = fully deterministic (same input → same output every time). 1.0 = very creative/random. We use 0.2 because this is a document Q&A application — we want consistent, factual, deterministic answers based on the document content, not creative interpretation. Low temperature keeps the model grounded to the provided context. Higher temperature would make it more likely to "creatively" fill in details not in the document (hallucinate).
+
+**Q: What happens if the GEMINI_API_KEY environment variable is not set?**
+The property `spring.ai.google.genai.api-key=${GEMINI_API_KEY:}` uses Spring's property placeholder with a default of empty string (`:` with no value after). The application starts successfully but every Gemini API call returns a 401 (unauthorized) or similar error because the API key is empty. The `GlobalExceptionHandler` catches this as a `ClientException` and returns a 502 response. Importantly, the API key is never hardcoded in the source code — Google's automated scanners scan public GitHub repositories and revoke any API keys they find.
+
+**Q: Walk me through what happens when I send two simultaneous requests with the same session ID.**
+Thread A and Thread B both arrive at `ChatHistoryService.getHistory("same-id")`. Both call `sessions.get("same-id")` — this is lock-free on `ConcurrentHashMap`, both get the same `SessionData` reference safely. Then both try to enter `synchronized (data.turns())`. Only one succeeds — say Thread A. Thread A creates a snapshot `ArrayList` of the Deque and exits the synchronized block. Thread B then enters, creates its own snapshot. Both snapshots contain identical data (assuming no `addTurn` happened in between). Both threads proceed to call Gemini in parallel (the actual Gemini HTTP call is outside the synchronized block — it's concurrent, which is correct). When both get answers, both call `addTurn` — each one enters the `synchronized (data.turns())` block exclusively. Two turns are added, one after the other. The Deque ends up with both turns.
+
+**Q: How does the Spring Security filter chain know which endpoints need auth and which don't?**
+`SecurityConfig.java` defines the rules:
+```java
+.authorizeHttpRequests(auth -> auth
+    .requestMatchers("/auth/**").permitAll()       // login — no token
+    .requestMatchers("/actuator/health").permitAll() // health check — no token
+    .requestMatchers("/actuator/info").permitAll()   // info — no token
+    .requestMatchers("/actuator/**").hasRole("ADMIN") // other actuator — admin only
+    .anyRequest().authenticated()                    // everything else — any valid JWT
+)
+```
+The `JwtAuthenticationFilter` runs first and attempts to authenticate from the JWT header. If it succeeds, the `SecurityContextHolder` has an authenticated user. If the JWT is missing (anonymous request) and the endpoint is `permitAll`, the request passes. If the endpoint requires authentication and the context is empty, the `AuthorizationFilter` rejects with 401.
+
+**Q: What is the difference between `fixedRate` and `fixedDelay` in @Scheduled?**
+`fixedRate = N` means: start the next execution N milliseconds after the **start** of the previous execution, regardless of how long it took. If execution takes 100ms and N=300ms, the next starts at T+300ms.
+`fixedDelay = N` means: wait N milliseconds after the **end** of the previous execution. If execution takes 100ms and N=300ms, the next starts at T+400ms.
+For the TTL cleanup (`fixedRate = 300_000`), we chose `fixedRate` because we want the cleanup to run on a regular wall-clock schedule (every 5 minutes), not be pushed back if the cleanup itself takes longer.
+
+**Q: Why does the app exclude `TransformersEmbeddingModelAutoConfiguration`?**
+Spring AI's `TransformersEmbeddingModel` auto-configuration uses DJL (Deep Java Library) for mean pooling, which on first use tries to download PyTorch native binaries from the internet. In corporate network environments with SSL certificate inspection, this download fails with SSL handshake errors. By excluding the auto-configuration and implementing our own `OnnxEmbeddingModel` bean, we do mean pooling in pure Java (no native downloads needed) and use ONNX Runtime for model inference. The result is identical embedding quality with no network dependency after the initial model file download.
+
+**Q: What is `@Primary` on the `embeddingModel` bean and why is it needed?**
+When multiple beans of the same type exist in the Spring context, `@Primary` tells Spring "use THIS one when no specific qualifier is given." Our `AiConfig.embeddingModel()` is annotated with `@Primary` because the `spring-ai-transformers` dependency might auto-configure its own `EmbeddingModel` bean (despite the auto-configuration exclusion, there can be edge cases). `@Primary` ensures that `SimpleVectorStore` and any other component that depends on `EmbeddingModel` always gets our custom `OnnxEmbeddingModel`, not some other accidentally-registered bean.
+
+**Q: How does the Postman collection use the sessionId from the response?**
+The Postman collection has a `sessionId` collection variable. The query request tests (under the "Tests" tab in Postman) have a script:
+```javascript
+var jsonData = pm.response.json();
+if (jsonData.sessionId) {
+    pm.collectionVariables.set("sessionId", jsonData.sessionId);
+}
+```
+This auto-saves the `sessionId` from the response into the collection variable. The request headers include `X-Session-Id: {{sessionId}}`. So on the first request, the header is blank (or empty), the server generates a new UUID, the test script saves it, and on all subsequent requests, the saved UUID is sent automatically. This simulates how a real client would manage sessions.
+
