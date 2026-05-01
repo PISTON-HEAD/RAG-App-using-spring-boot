@@ -36,7 +36,9 @@
 This is a **Spring Boot RAG (Retrieval Augmented Generation) application** with **conversational memory**.
 
 ### What it does
+
 Users upload documents (PDF, DOCX, TXT, etc.). They can then ask natural language questions. The system:
+
 1. Converts the question into a mathematical vector (embedding)
 2. Searches the uploaded document chunks for the most relevant pieces
 3. Feeds those pieces as context to Google Gemini (the LLM)
@@ -44,26 +46,27 @@ Users upload documents (PDF, DOCX, TXT, etc.). They can then ask natural languag
 5. The conversation history from the session is also sent so the LLM understands follow-up questions
 
 ### Why RAG instead of just asking the LLM?
+
 LLMs are trained on public internet data up to a cutoff date. They don't know about **your** private documents. RAG lets you inject your own knowledge into every query. The LLM's role becomes "given this context, answer this question" rather than "use everything you know".
 
 ---
 
 ## 2. Technology Stack
 
-| Layer | Technology | Version | Purpose |
-|---|---|---|---|
-| Framework | Spring Boot | 3.3.5 | Application container |
-| Language | Java | 21 | Language runtime |
-| Build | Maven | 3.x | Dependency management |
-| LLM | Google Gemini 2.5 Flash (via Spring AI) | 1.1.4 | Answer generation |
-| Embeddings | ONNX all-MiniLM-L6-v2 | Custom bean | Local text → vector conversion |
-| ONNX Runtime | Microsoft ONNX Runtime (Java) | via Spring AI | Runs the ONNX model |
-| Tokenizer | DJL HuggingFace Tokenizers | 0.32.0 | Text → token IDs |
-| Vector Store | Spring AI SimpleVectorStore | 1.1.4 | In-memory cosine similarity search |
-| Document Parser | Apache Tika | via Spring AI | Extract text from PDF/DOCX/TXT/HTML |
-| Security | Spring Security + JJWT | 0.12.6 | JWT-based stateless auth |
-| Monitoring | Spring Boot Actuator | 3.3.5 | Health, metrics, env, beans |
-| Port | Tomcat embedded | — | 8082 |
+| Layer           | Technology                              | Version       | Purpose                             |
+| --------------- | --------------------------------------- | ------------- | ----------------------------------- |
+| Framework       | Spring Boot                             | 3.3.5         | Application container               |
+| Language        | Java                                    | 21            | Language runtime                    |
+| Build           | Maven                                   | 3.x           | Dependency management               |
+| LLM             | Google Gemini 2.5 Flash (via Spring AI) | 1.1.4         | Answer generation                   |
+| Embeddings      | ONNX all-MiniLM-L6-v2                   | Custom bean   | Local text → vector conversion      |
+| ONNX Runtime    | Microsoft ONNX Runtime (Java)           | via Spring AI | Runs the ONNX model                 |
+| Tokenizer       | DJL HuggingFace Tokenizers              | 0.32.0        | Text → token IDs                    |
+| Vector Store    | Spring AI SimpleVectorStore             | 1.1.4         | In-memory cosine similarity search  |
+| Document Parser | Apache Tika                             | via Spring AI | Extract text from PDF/DOCX/TXT/HTML |
+| Security        | Spring Security + JJWT                  | 0.12.6        | JWT-based stateless auth            |
+| Monitoring      | Spring Boot Actuator                    | 3.3.5         | Health, metrics, env, beans         |
+| Port            | Tomcat embedded                         | —             | 8082                                |
 
 ---
 
@@ -107,6 +110,7 @@ LLMs are trained on public internet data up to a cutoff date. They don't know ab
 ```
 
 ### Package Structure
+
 ```
 com.ragapp
 ├── SpringRagApplication.java        — Main class, @EnableScheduling
@@ -184,6 +188,7 @@ documentStore.put(documentId, new DocumentInfo(...))
 ```
 
 ### Why chunk documents?
+
 - LLMs have a maximum context window. Even Gemini 2.5 Flash with 1M tokens cannot efficiently process thousands of documents at once for retrieval.
 - Chunking gives fine-grained retrieval — you retrieve the 4 most relevant **paragraphs**, not the 4 most relevant **entire documents**.
 - Overlap prevents breaking sentences across chunk boundaries. If a sentence starts at token 795 and the chunk ends at 800, the next chunk starts at 700, so the sentence is fully present in both.
@@ -193,9 +198,11 @@ documentStore.put(documentId, new DocumentInfo(...))
 ## 5. ONNX Embeddings — What, Why, and How
 
 ### What is ONNX?
+
 **ONNX (Open Neural Network Exchange)** is an open standard format for representing machine learning models. Think of it as the "PDF format" for AI models — any ML framework (PyTorch, TensorFlow, scikit-learn) can export a model to `.onnx`, and any ONNX runtime can run it regardless of the original framework.
 
 ### The model: all-MiniLM-L6-v2
+
 - Developed by Microsoft, fine-tuned on sentence-pair tasks
 - A distilled (compressed) version of BERT — 6 transformer layers instead of 12
 - Input: a text string
@@ -204,14 +211,14 @@ documentStore.put(documentId, new DocumentInfo(...))
 
 ### Why ONNX instead of calling an embedding API (like Google's text-embedding-004)?
 
-| Aspect | ONNX (local) | Embedding API (remote) |
-|---|---|---|
-| **Cost** | Free — runs on CPU | Charged per token |
-| **Latency** | ~5-50ms (local CPU) | ~100-500ms (network) |
-| **Privacy** | Data never leaves your machine | Data sent to Google/OpenAI |
-| **Offline** | Works with no internet after first download | Requires internet always |
-| **Consistency** | Model is fixed — embeddings never change | API may update model silently |
-| **Rate limits** | None | Has quota limits |
+| Aspect          | ONNX (local)                                | Embedding API (remote)        |
+| --------------- | ------------------------------------------- | ----------------------------- |
+| **Cost**        | Free — runs on CPU                          | Charged per token             |
+| **Latency**     | ~5-50ms (local CPU)                         | ~100-500ms (network)          |
+| **Privacy**     | Data never leaves your machine              | Data sent to Google/OpenAI    |
+| **Offline**     | Works with no internet after first download | Requires internet always      |
+| **Consistency** | Model is fixed — embeddings never change    | API may update model silently |
+| **Rate limits** | None                                        | Has quota limits              |
 
 For a demo/portfolio app, ONNX is ideal: free, private, no quota worries.
 
@@ -255,7 +262,9 @@ Step 4: L2 NORMALIZATION
 ```
 
 ### Where does the model file live?
+
 On first startup, `ResourceCacheService` downloads:
+
 - `tokenizer.json` (~780 KB) from Spring AI's GitHub
 - `model.onnx` (~23 MB) from GitHub LFS
 
@@ -268,6 +277,7 @@ On subsequent startups, no download — reads from disk. This is why the first r
 ## 6. Vector Similarity Search — How It Works
 
 ### The core idea
+
 Every chunk of every uploaded document is stored as a 384-dimensional float vector. When you ask a question, your question is also converted to a 384-dim vector using the same model. Then we measure the **angle** between the question vector and every stored chunk vector. Chunks that are semantically similar to the question will have vectors pointing in nearly the same direction — small angle, high cosine similarity.
 
 ### Cosine Similarity formula
@@ -382,6 +392,7 @@ Step 7: Return response
 ## 8. JWT Authentication — How It Works
 
 ### What is JWT?
+
 **JSON Web Token** — a self-contained, cryptographically signed token that carries user identity and claims. It has three parts separated by dots: `header.payload.signature`
 
 ```
@@ -396,6 +407,7 @@ eyJzdWIiOiJhZG1pbiIsInJvbGVzIjpbeyJhdXRob3JpdHkiOiJST0xFX0FETUlOIn1dfQ==
 ### Why JWT is stateless — and why it matters
 
 **Traditional session-based auth:**
+
 ```
 Client → Server: Login
 Server → Database: INSERT session (sessionId=xyz, userId=1, expiresAt=...)
@@ -407,6 +419,7 @@ Server → Database: SELECT * FROM sessions WHERE sessionId=xyz  ← DB hit ever
 ```
 
 **JWT-based auth (our app):**
+
 ```
 Client → Server: Login
 Server: Creates JWT, signs it with secret key. NO database storage.
@@ -420,6 +433,7 @@ Server: Verify signature with secret key (pure math, no DB hit)
 ```
 
 **Why stateless matters:**
+
 1. **Scalability** — you can have 100 server instances and any of them can validate any token without coordination
 2. **No DB dependency** — auth works even if the DB is slow or down
 3. **Microservices friendly** — any service with the same secret key can validate tokens
@@ -427,6 +441,7 @@ Server: Verify signature with secret key (pure math, no DB hit)
 ### How it works in our app
 
 **Login flow:**
+
 ```java
 // JwtService.generateToken()
 Jwts.builder()
@@ -439,6 +454,7 @@ Jwts.builder()
 ```
 
 **Every request flow:**
+
 ```java
 // JwtAuthenticationFilter (runs before every controller method)
 String header = request.getHeader("Authorization"); // "Bearer eyJ..."
@@ -454,16 +470,19 @@ if (jwtService.isTokenValid(jwt, user)) {            // check expiry + username 
 ```
 
 ### Algorithm: HS384 (HMAC-SHA384)
+
 - HMAC = Hash-based Message Authentication Code
 - SHA-384 = 384-bit hash function
 - The server signs with the secret key. Any party with the same key can verify.
 - We use HS384 (stronger than the common HS256) — 48-byte output instead of 32-byte
 
 ### Users in our app
+
 ```
 admin / admin123 → ROLE_ADMIN → can access /actuator/**
 user  / user123  → ROLE_USER  → cannot access /actuator/**
 ```
+
 Stored in-memory via `UserConfig.java` (no database). Passwords are BCrypt hashed.
 
 ---
@@ -471,7 +490,9 @@ Stored in-memory via `UserConfig.java` (no database). Passwords are BCrypt hashe
 ## 9. Conversational Memory — The New Feature
 
 ### The problem with stateless RAG
+
 Before this feature, every query was independent:
+
 ```
 Turn 1: "What is Spring Boot?"
         → Gemini: "Spring Boot is a Java framework..."
@@ -510,6 +531,7 @@ Now Gemini fully understands "auto-configuration" from the context of the conver
 ### Key design decision: we store history server-side
 
 The client only sends a `sessionId` (UUID). The server holds all the Q&A pairs. This is intentional:
+
 - The client doesn't need to re-send its entire chat history on every request
 - Reduces request payload size significantly (imaginge 20 turns of Q&A in every request body)
 - The server controls the window size (max 5 turns) — client can't bypass this
@@ -527,6 +549,7 @@ Our `ChatHistoryService` is a **Spring `@Service` bean** — it's a **singleton*
 - **Lost updates** — Two `put()` operations on the same key, one overwrites the other silently
 
 `ConcurrentHashMap` solves all of this with **lock striping**:
+
 - The internal array is divided into 16 segments (by default)
 - Each segment has its own lock
 - Two operations on **different** keys (different segments) proceed simultaneously with no blocking
@@ -545,16 +568,21 @@ Our `ChatHistoryService` is a **Spring `@Service` bean** — it's a **singleton*
 ## 11. Why Deque? How It Stores Q&A
 
 ### What is a Deque?
+
 `Deque` = Double-Ended Queue — a data structure that supports efficient insertion and removal from **both ends**:
+
 - `addLast(x)` — adds to the tail (newest element)
 - `pollFirst()` — removes from the head (oldest element)
 - `peek()`, iteration — works in order from head (oldest) to tail (newest)
 
 ### Implementation: `ArrayDeque`
+
 We use `ArrayDeque` — a resizable array implementation of `Deque`. It's backed by a circular array, making both head and tail operations O(1).
 
 ### Why Deque for a sliding window?
+
 We need **FIFO with a fixed max size** — first in, first out:
+
 ```
 State after turn 5:
     HEAD → [Q1/A1] [Q2/A2] [Q3/A3] [Q4/A4] [Q5/A5] ← TAIL
@@ -568,19 +596,23 @@ State after turn 6:
 ```
 
 A Deque is perfect for this because:
+
 - `pollFirst()` to evict oldest: **O(1)**
 - `addLast()` to add newest: **O(1)**
 - Iteration gives chronological order (oldest to newest): exactly what Gemini needs
 
 ### What is stored in each ChatTurn?
+
 ```java
 public record ChatTurn(String question, String answer, LocalDateTime timestamp) {}
 ```
+
 - `question` — the user's question text
 - `answer` — Gemini's response text
 - `timestamp` — when this turn happened (for debugging/auditing)
 
 ### How it's sent to Gemini
+
 ```java
 for (ChatTurn turn : history) {
     historyMessages.add(new UserMessage(turn.question()));
@@ -603,6 +635,7 @@ private final ConcurrentHashMap<String, SessionData> sessions = new ConcurrentHa
 **`ConcurrentHashMap` only makes the MAP operations thread-safe** — it protects `put`, `get`, `remove` on the map itself. It does NOT make the **values** inside the map thread-safe.
 
 Consider this scenario:
+
 - Thread A is reading history for session `xyz` (iterating the Deque)
 - Thread B simultaneously adds a new turn to the same session's Deque
 - `ArrayDeque` is **not thread-safe** — concurrent read + write can cause `ConcurrentModificationException` or corrupted iteration
@@ -625,6 +658,7 @@ synchronized (data.turns()) {
 ```
 
 The `synchronized (data.turns())` block uses the **Deque instance as a monitor lock**. Java guarantees only one thread can hold a given object's monitor at a time. So:
+
 - If Thread A is inside `getHistory`'s synchronized block, Thread B's `addTurn` synchronized block **waits**
 - They can't execute concurrently on the same session's Deque
 
@@ -636,6 +670,7 @@ The `synchronized (data.turns())` block uses the **Deque instance as a monitor l
 ## 13. Session ID — Generation, Lifecycle, Expiry
 
 ### Generation
+
 ```java
 private String resolveSessionId(String sessionId) {
     return (sessionId != null && !sessionId.isBlank()) ? sessionId : UUID.randomUUID().toString();
@@ -691,6 +726,7 @@ chatHistoryService.getHistory("abc-123")
 ```
 
 ### The SessionData record
+
 ```java
 private record SessionData(Deque<ChatTurn> turns, AtomicLong lastActiveMs) {}
 ```
@@ -704,6 +740,7 @@ private record SessionData(Deque<ChatTurn> turns, AtomicLong lastActiveMs) {}
 ### Token budget math
 
 Each Gemini API call has:
+
 - A **system prompt** with RAG context chunks: ~2,000-4,000 tokens (4 chunks × 800 tokens each)
 - The **current question**: ~10-50 tokens
 - **History (5 turns)**: ~5 questions + 5 answers ≈ 1,000-2,000 tokens
@@ -712,6 +749,7 @@ Each Gemini API call has:
 Gemini 2.5 Flash supports **1,000,000 input tokens** — so even 100 turns would be technically fine.
 
 **But there are other reasons to cap it:**
+
 1. **Memory leak prevention** — without a cap, a single session with thousands of turns would consume unbounded JVM heap space. Sessions are in-memory, not on disk.
 2. **Cost** — each additional turn adds tokens = slightly more API cost
 3. **Relevance decay** — conversations typically drift. A question asked 20 turns ago is rarely relevant to the current question. 5 turns captures the most recent context window which is almost always enough.
@@ -719,6 +757,7 @@ Gemini 2.5 Flash supports **1,000,000 input tokens** — so even 100 turns would
 
 **Why 5 specifically?**
 5 is a good balance — enough for:
+
 - "Tell me more about that" (1 turn back)
 - "Compare what you said earlier about X vs Y" (2-3 turns back)
 - Multi-step explanations (4-5 turns)
@@ -730,6 +769,7 @@ Configurable via `app.rag.chat-history.max-turns=5` in `application.properties` 
 ## 15. What Happens When a Session Expires?
 
 ### TTL cleanup mechanism
+
 ```java
 @Scheduled(fixedRate = 300_000)  // runs every 5 minutes (300,000 ms)
 public void evictExpiredSessions() {
@@ -757,7 +797,7 @@ The expired session was removed from the map. `sessions.get(oldId)` returns `nul
 
 ### Why every 5 minutes?
 
-With a 30-minute TTL and a 5-minute cleanup interval, a session's **maximum actual lifetime** after last use is 35 minutes (TTL + one cleanup interval). This small overshoot is completely acceptable. 
+With a 30-minute TTL and a 5-minute cleanup interval, a session's **maximum actual lifetime** after last use is 35 minutes (TTL + one cleanup interval). This small overshoot is completely acceptable.
 
 Shorter intervals (e.g., every 10 seconds) would waste CPU. Longer intervals (e.g., every hour) would let many expired sessions accumulate. 5 minutes is a practical sweet spot.
 
@@ -798,14 +838,17 @@ DispatcherServlet → Controller method
 ```
 
 ### CSRF disabled — why?
+
 CSRF (Cross-Site Request Forgery) attacks target **cookie-based sessions**. The attacker tricks a browser into making a request that sends the victim's session cookie. Our app uses **Bearer tokens in Authorization header** — browsers don't automatically attach headers from other origins. Therefore CSRF protection is unnecessary and disabled.
 
 ### STATELESS session management
+
 ```java
 .sessionManagement(session ->
     session.sessionCreationPolicy(SessionCreationPolicy.STATELESS)
 )
 ```
+
 Spring Security won't create an `HttpSession`. No server-side session store. The `SecurityContextHolder` is populated fresh on every request from the JWT. This is the standard pattern for REST APIs.
 
 ---
@@ -816,19 +859,20 @@ Spring Security won't create an `HttpSession`. No server-side session store. The
 
 ### Handler map
 
-| Exception | HTTP Status | Scenario |
-|---|---|---|
-| `BadCredentialsException` | 401 | Wrong username/password at login |
-| `IllegalArgumentException` | 404 | Document ID not found |
-| `MethodArgumentNotValidException` | 400 | `@Valid` validation failed (e.g., empty question) |
-| `MaxUploadSizeExceededException` | 413 | File > 10MB |
-| `HttpMediaTypeNotSupportedException` | 415 | Wrong Content-Type on upload (should be multipart/form-data) |
-| `MultipartException` | 400 | Malformed multipart request |
-| `MissingServletRequestParameterException` | 400 | Missing required form field |
-| `ClientException` (Gemini) | 429 or 502 | Gemini rate limit (429) or API rejection (502) |
-| `Exception` (catch-all) | 500 | Walks cause chain looking for wrapped `ClientException` |
+| Exception                                 | HTTP Status | Scenario                                                     |
+| ----------------------------------------- | ----------- | ------------------------------------------------------------ |
+| `BadCredentialsException`                 | 401         | Wrong username/password at login                             |
+| `IllegalArgumentException`                | 404         | Document ID not found                                        |
+| `MethodArgumentNotValidException`         | 400         | `@Valid` validation failed (e.g., empty question)            |
+| `MaxUploadSizeExceededException`          | 413         | File > 10MB                                                  |
+| `HttpMediaTypeNotSupportedException`      | 415         | Wrong Content-Type on upload (should be multipart/form-data) |
+| `MultipartException`                      | 400         | Malformed multipart request                                  |
+| `MissingServletRequestParameterException` | 400         | Missing required form field                                  |
+| `ClientException` (Gemini)                | 429 or 502  | Gemini rate limit (429) or API rejection (502)               |
+| `Exception` (catch-all)                   | 500         | Walks cause chain looking for wrapped `ClientException`      |
 
 ### The cause-chain walking trick
+
 Spring AI wraps `ClientException` inside `RuntimeException("Failed to generate content")`. Without this trick, a Gemini 429 would appear as a generic 500:
 
 ```java
@@ -854,6 +898,7 @@ public ResponseEntity<...> handleGeneral(Exception ex) {
 Spring Boot Actuator exposes management endpoints.
 
 ### Access control
+
 ```
 /actuator/health → PUBLIC (no token)
 /actuator/info   → PUBLIC (no token)
@@ -862,17 +907,17 @@ Spring Boot Actuator exposes management endpoints.
 
 ### Exposed endpoints
 
-| Endpoint | What it shows |
-|---|---|
-| `/actuator/health` | UP/DOWN + disk space + ping |
-| `/actuator/info` | App name, description, version from `info.app.*` properties |
-| `/actuator/metrics` | List of all metric names (JVM, HTTP, Spring Security, Tomcat) |
-| `/actuator/metrics/jvm.memory.used` | Specific metric value with tags |
-| `/actuator/env` | All property sources, active profiles, system properties (secrets masked) |
-| `/actuator/beans` | All Spring beans in context (useful to verify embeddingModel, vectorStore) |
-| `/actuator/mappings` | All registered @RequestMapping routes |
-| `/actuator/loggers` | All loggers and levels; POST to change at runtime |
-| `/actuator/heapdump` | Download JVM heap dump (.hprof) for memory analysis |
+| Endpoint                            | What it shows                                                              |
+| ----------------------------------- | -------------------------------------------------------------------------- |
+| `/actuator/health`                  | UP/DOWN + disk space + ping                                                |
+| `/actuator/info`                    | App name, description, version from `info.app.*` properties                |
+| `/actuator/metrics`                 | List of all metric names (JVM, HTTP, Spring Security, Tomcat)              |
+| `/actuator/metrics/jvm.memory.used` | Specific metric value with tags                                            |
+| `/actuator/env`                     | All property sources, active profiles, system properties (secrets masked)  |
+| `/actuator/beans`                   | All Spring beans in context (useful to verify embeddingModel, vectorStore) |
+| `/actuator/mappings`                | All registered @RequestMapping routes                                      |
+| `/actuator/loggers`                 | All loggers and levels; POST to change at runtime                          |
+| `/actuator/heapdump`                | Download JVM heap dump (.hprof) for memory analysis                        |
 
 ---
 
@@ -933,6 +978,7 @@ info.app.version=0.0.1-SNAPSHOT
 ### Scenario: User uploads a document, asks a question, asks a follow-up
 
 **Phase 1: Login**
+
 ```
 POST /auth/login  { "username": "admin", "password": "admin123" }
 → AuthController → AuthenticationManager.authenticate()
@@ -942,6 +988,7 @@ POST /auth/login  { "username": "admin", "password": "admin123" }
 ```
 
 **Phase 2: Upload**
+
 ```
 POST /api/documents/upload  (multipart/form-data, file=myDoc.pdf)
 Authorization: Bearer eyJ...
@@ -961,6 +1008,7 @@ Authorization: Bearer eyJ...
 ```
 
 **Phase 3: First query (new session)**
+
 ```
 POST /api/documents/f1a2b3.../query
 Authorization: Bearer eyJ...
@@ -990,6 +1038,7 @@ Authorization: Bearer eyJ...
 ```
 
 **Phase 4: Follow-up query (reuse session)**
+
 ```
 POST /api/documents/f1a2b3.../query
 Authorization: Bearer eyJ...
@@ -1020,14 +1069,16 @@ X-Session-Id: sess-abc
 ## 21. What Changed: Base RAG vs Conversational RAG
 
 ### New files added
-| File | Purpose |
-|---|---|
-| `dto/ChatTurn.java` | Immutable record holding one Q&A pair with timestamp |
+
+| File                            | Purpose                                              |
+| ------------------------------- | ---------------------------------------------------- |
+| `dto/ChatTurn.java`             | Immutable record holding one Q&A pair with timestamp |
 | `query/ChatHistoryService.java` | In-memory session store, sliding window, TTL cleanup |
 
 ### Modified files
 
 **`SpringRagApplication.java`** — Added `@EnableScheduling`
+
 ```java
 // Before
 @SpringBootApplication(exclude = {...})
@@ -1040,6 +1091,7 @@ public class SpringRagApplication { ... }
 ```
 
 **`dto/QueryResponse.java`** — Added `sessionId` field
+
 ```java
 // Before
 public record QueryResponse(String answer, String question, String documentId, List<String> relevantChunks) {}
@@ -1049,12 +1101,14 @@ public record QueryResponse(String sessionId, String answer, String question, St
 ```
 
 **`query/QueryService.java`** — Core changes
+
 - Constructor now injects `ChatHistoryService`
 - `query()` and `queryAllDocuments()` accept `sessionId` parameter
 - `resolveSessionId()` helper: reuse or generate UUID
 - `buildResponse()` fetches history, converts to `Message` objects, injects into prompt, saves turn after response
 
 **`query/QueryController.java`** — New `@RequestHeader`
+
 ```java
 // Before
 public ResponseEntity<QueryResponse> queryDocument(@PathVariable String documentId, @Valid @RequestBody QueryRequest request)
@@ -1068,6 +1122,7 @@ public ResponseEntity<QueryResponse> queryDocument(@PathVariable String document
 **`query/GlobalQueryController.java`** — Same header change
 
 **`application.properties`** — Two new properties
+
 ```properties
 app.rag.chat-history.max-turns=5
 app.rag.chat-history.ttl-minutes=30
