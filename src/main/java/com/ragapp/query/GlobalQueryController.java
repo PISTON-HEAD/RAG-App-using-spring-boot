@@ -3,7 +3,6 @@ package com.ragapp.query;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
-import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
@@ -19,7 +18,6 @@ import jakarta.validation.Valid;
  * or when you want the system to find the best match from everything uploaded.
  *
  * POST /query  { "question": "What are the payment terms?" }
- * Pass X-Session-Id header to maintain conversation history across requests.
  */
 @RestController
 @RequestMapping("/api/query")
@@ -32,11 +30,8 @@ public class GlobalQueryController {
     }
 
     @PostMapping
-    public ResponseEntity<QueryResponse> queryAllDocuments(
-            @Valid @RequestBody QueryRequest request,
-            @RequestHeader(value = "X-Session-Id", required = false) String sessionId
-    ) {
-        QueryResponse response = queryService.queryAllDocuments(request, sessionId);
+    public ResponseEntity<QueryResponse> queryAllDocuments(@Valid @RequestBody QueryRequest request) {
+        QueryResponse response = queryService.queryAllDocuments(request);
         return ResponseEntity.ok(response);
     }
 }
