@@ -1,0 +1,532 @@
+{
+  "info": {
+    "_postman_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+    "name": "Spring RAG App",
+    "description": "Complete API collection for Spring Boot RAG application with conversational memory.\n\n**Setup:**\n1. Run the app: `$env:GEMINI_API_KEY = \"...\"; mvn spring-boot:run`\n2. Send 'Login (admin)' — token is saved automatically to `{{token}}`\n3. Upload a document — documentId is saved automatically to `{{documentId}}`\n4. Send any query — sessionId is saved automatically to `{{sessionId}}`\n5. Send follow-up queries with `{{sessionId}}` to use conversational memory",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:8082",
+      "type": "string"
+    },
+    {
+      "key": "token",
+      "value": "",
+      "type": "string",
+      "description": "JWT token — auto-populated by the Login requests"
+    },
+    {
+      "key": "documentId",
+      "value": "",
+      "type": "string",
+      "description": "Document ID — auto-populated by Upload Document"
+    },
+    {
+      "key": "sessionId",
+      "value": "",
+      "type": "string",
+      "description": "Conversation session ID — auto-populated by query requests"
+    }
+  ],
+  "item": [
+    {
+      "name": "1. Auth",
+      "item": [
+        {
+          "name": "Login (admin)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var json = pm.response.json();",
+                  "if (json.token) {",
+                  "    pm.collectionVariables.set('token', json.token);",
+                  "    console.log('Token saved:', json.token.substring(0, 30) + '...');",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"admin\",\n  \"password\": \"admin123\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/auth/login",
+              "host": ["{{baseUrl}}"],
+              "path": ["auth", "login"]
+            },
+            "description": "Login as admin. ROLE_ADMIN can access /actuator/** endpoints.\nToken is automatically saved to {{token}}."
+          }
+        },
+        {
+          "name": "Login (user)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var json = pm.response.json();",
+                  "if (json.token) {",
+                  "    pm.collectionVariables.set('token', json.token);",
+                  "    console.log('Token saved:', json.token.substring(0, 30) + '...');",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"user\",\n  \"password\": \"user123\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/auth/login",
+              "host": ["{{baseUrl}}"],
+              "path": ["auth", "login"]
+            },
+            "description": "Login as regular user. ROLE_USER — cannot access /actuator/** endpoints."
+          }
+        },
+        {
+          "name": "Login (wrong password — expect 401)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"admin\",\n  \"password\": \"wrongpassword\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/auth/login",
+              "host": ["{{baseUrl}}"],
+              "path": ["auth", "login"]
+            },
+            "description": "Tests invalid credentials. Expect HTTP 401 Unauthorized."
+          }
+        }
+      ]
+    },
+    {
+      "name": "2. Documents",
+      "item": [
+        {
+          "name": "Upload Document",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var json = pm.response.json();",
+                  "if (json.documentId) {",
+                  "    pm.collectionVariables.set('documentId', json.documentId);",
+                  "    console.log('Document ID saved:', json.documentId);",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" }
+            ],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": "",
+                  "description": "Select a file: PDF, DOCX, TXT, HTML, etc."
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/documents/upload",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "documents", "upload"]
+            },
+            "description": "Upload a document for RAG ingestion.\n\nPipeline: Tika parse → chunk (800 tokens, 100 overlap) → ONNX embed (384-dim) → SimpleVectorStore.\n\nReturns documentId — automatically saved to {{documentId}}.\n\nSupported formats: PDF, DOCX, DOC, TXT, HTML, PPTX, XLSX, and any format Apache Tika supports."
+          }
+        },
+        {
+          "name": "List Documents",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/documents",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "documents"]
+            },
+            "description": "Returns all uploaded documents with their metadata: documentId, filename, size, chunk count, upload timestamp."
+          }
+        }
+      ]
+    },
+    {
+      "name": "3. Query — Single Document",
+      "item": [
+        {
+          "name": "Query Document (new session)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var json = pm.response.json();",
+                  "if (json.sessionId) {",
+                  "    pm.collectionVariables.set('sessionId', json.sessionId);",
+                  "    console.log('Session ID saved:', json.sessionId);",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"question\": \"What is the main topic of this document?\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/documents/{{documentId}}/query",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "documents", "{{documentId}}", "query"]
+            },
+            "description": "Query a specific document. No X-Session-Id header sent — server generates a new session UUID.\n\nThe returned sessionId is saved to {{sessionId}} automatically. Use it in follow-up requests to maintain conversational memory."
+          }
+        },
+        {
+          "name": "Query Document (follow-up with session)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var json = pm.response.json();",
+                  "if (json.sessionId) {",
+                  "    pm.collectionVariables.set('sessionId', json.sessionId);",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" },
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "X-Session-Id", "value": "{{sessionId}}", "description": "Sends the saved session ID to continue the conversation" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"question\": \"Can you elaborate on that?\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/documents/{{documentId}}/query",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "documents", "{{documentId}}", "query"]
+            },
+            "description": "Follow-up query using the same session.\n\nThe X-Session-Id header tells the server to load conversation history. The previous Q&A turn is injected into the Gemini prompt so it can resolve references like 'that', 'it', 'what you said earlier'.\n\nThis is the KEY test for conversational memory — a vague follow-up question that only makes sense in context."
+          }
+        },
+        {
+          "name": "Query Document (no memory — no session header)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"question\": \"Can you elaborate on that?\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/documents/{{documentId}}/query",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "documents", "{{documentId}}", "query"]
+            },
+            "description": "Control test — same follow-up question WITHOUT X-Session-Id.\n\nGemini has no history, so it cannot resolve 'that'. Compare this response to the follow-up with session to see the difference conversational memory makes."
+          }
+        },
+        {
+          "name": "Query Non-existent Document (expect 404)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"question\": \"What is this?\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/documents/non-existent-id/query",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "documents", "non-existent-id", "query"]
+            },
+            "description": "Tests querying a document that doesn't exist. Expect HTTP 404 — IllegalArgumentException handled by GlobalExceptionHandler."
+          }
+        },
+        {
+          "name": "Query Empty Question (expect 400)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"question\": \"\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/documents/{{documentId}}/query",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "documents", "{{documentId}}", "query"]
+            },
+            "description": "Tests @Valid validation. Empty question should return HTTP 400 Bad Request."
+          }
+        }
+      ]
+    },
+    {
+      "name": "4. Query — All Documents (Global)",
+      "item": [
+        {
+          "name": "Global Query (new session)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var json = pm.response.json();",
+                  "if (json.sessionId) {",
+                  "    pm.collectionVariables.set('sessionId', json.sessionId);",
+                  "    console.log('Session ID saved:', json.sessionId);",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"question\": \"What topics are covered across all documents?\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/query",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "query"]
+            },
+            "description": "Searches across ALL uploaded documents — no documentId filter. Useful when you don't know which document contains the answer.\n\nresponse.documentId will be 'ALL_DOCUMENTS'."
+          }
+        },
+        {
+          "name": "Global Query (follow-up with session)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var json = pm.response.json();",
+                  "if (json.sessionId) {",
+                  "    pm.collectionVariables.set('sessionId', json.sessionId);",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" },
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "X-Session-Id", "value": "{{sessionId}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"question\": \"Tell me more about the first topic you mentioned.\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/query",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "query"]
+            },
+            "description": "Follow-up global query with session memory."
+          }
+        }
+      ]
+    },
+    {
+      "name": "5. Actuator (admin only)",
+      "item": [
+        {
+          "name": "Health (public)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/actuator/health",
+              "host": ["{{baseUrl}}"],
+              "path": ["actuator", "health"]
+            },
+            "description": "Public endpoint — no token required. Returns UP/DOWN status."
+          }
+        },
+        {
+          "name": "Info (public)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/actuator/info",
+              "host": ["{{baseUrl}}"],
+              "path": ["actuator", "info"]
+            },
+            "description": "Public endpoint — no token required. Returns app name, description, version from application.properties."
+          }
+        },
+        {
+          "name": "Metrics (list)",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/actuator/metrics",
+              "host": ["{{baseUrl}}"],
+              "path": ["actuator", "metrics"]
+            },
+            "description": "Lists all available metric names. Requires ROLE_ADMIN."
+          }
+        },
+        {
+          "name": "Metrics — JVM Memory Used",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/actuator/metrics/jvm.memory.used",
+              "host": ["{{baseUrl}}"],
+              "path": ["actuator", "metrics", "jvm.memory.used"]
+            },
+            "description": "Current JVM heap memory usage in bytes. Requires ROLE_ADMIN."
+          }
+        },
+        {
+          "name": "Environment",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/actuator/env",
+              "host": ["{{baseUrl}}"],
+              "path": ["actuator", "env"]
+            },
+            "description": "All property sources and environment variables. Secrets are masked. Requires ROLE_ADMIN."
+          }
+        },
+        {
+          "name": "Beans",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/actuator/beans",
+              "host": ["{{baseUrl}}"],
+              "path": ["actuator", "beans"]
+            },
+            "description": "All Spring beans in context. Useful to verify embeddingModel, vectorStore, chatHistoryService beans are registered. Requires ROLE_ADMIN."
+          }
+        },
+        {
+          "name": "Mappings",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/actuator/mappings",
+              "host": ["{{baseUrl}}"],
+              "path": ["actuator", "mappings"]
+            },
+            "description": "All registered @RequestMapping routes with their handler methods. Requires ROLE_ADMIN."
+          }
+        },
+        {
+          "name": "Loggers",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/actuator/loggers",
+              "host": ["{{baseUrl}}"],
+              "path": ["actuator", "loggers"]
+            },
+            "description": "All loggers and their current levels. POST to this endpoint to change log level at runtime without restart. Requires ROLE_ADMIN."
+          }
+        },
+        {
+          "name": "Actuator (no token — expect 401/403)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/actuator/metrics",
+              "host": ["{{baseUrl}}"],
+              "path": ["actuator", "metrics"]
+            },
+            "description": "Tests that /actuator/** (except health and info) is protected. Expect 401 Unauthorized without a token."
+          }
+        }
+      ]
+    }
+  ]
+}
